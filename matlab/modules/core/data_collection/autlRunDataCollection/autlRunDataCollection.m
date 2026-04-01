@@ -66,6 +66,27 @@ end
 if ~isfield(mission_config, 'landing_pad_topic')
     mission_config.landing_pad_topic = '/autolanding/landing_pad';
 end
+if ~isfield(mission_config, 'landing_pad_follow_topic')
+    mission_config.landing_pad_follow_topic = true;
+end
+if ~isfield(mission_config, 'landing_pad_follow_interval_s')
+    mission_config.landing_pad_follow_interval_s = 0.2;
+end
+if ~isfield(mission_config, 'landing_pad_apply_set_pose')
+    mission_config.landing_pad_apply_set_pose = true;
+end
+if ~isfield(mission_config, 'landing_pad_model_name')
+    mission_config.landing_pad_model_name = 'aruco_landing_box';
+end
+if ~isfield(mission_config, 'landing_pad_enable_default_motion')
+    mission_config.landing_pad_enable_default_motion = true;
+end
+if ~isfield(mission_config, 'landing_pad_motion_radius_m')
+    mission_config.landing_pad_motion_radius_m = 0.35;
+end
+if ~isfield(mission_config, 'landing_pad_motion_rate_rad_s')
+    mission_config.landing_pad_motion_rate_rad_s = 0.45;
+end
 if ~isfield(mission_config, 'allow_simulated_fallback')
     mission_config.allow_simulated_fallback = false;
 end
@@ -189,6 +210,7 @@ try
 
     % Publish landing pad spec topic so downstream consumers can subscribe.
     landing_pad_publish_status = autlPublishLandingPadTopic(mission_config, sessionDir, log_prefix);
+    landing_pad_runtime = autlInitLandingPadRuntime(mission_config, log_prefix);
 
     % Arm/takeoff once so vehicle actually moves during collection.
     control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
@@ -282,6 +304,9 @@ try
                 last_telemetry_query_time = t_elapsed;
             end
             vehicle_state = last_vehicle_state;
+
+            [mission_config, landing_pad_runtime] = autlUpdateLandingPadRuntime( ...
+                mission_config, landing_pad_runtime, t_elapsed, log_prefix);
             
             % Store raw data (no processing, no ontology)
             raw_data.timestamp(sample_idx) = t_elapsed;
@@ -335,6 +360,11 @@ try
             % Update real-time visualization every 10 samples
             if viz_state.enabled && mod(sample_idx, 10) == 0 && isgraphics(viz_state.fig)
                 try
+                    viz_state = autlEnsureRealtimeVizState(viz_state, mission_config.session_id);
+                    if ~viz_state.enabled
+                        continue;
+                    end
+
                     % Extract current trajectory
                     pos_xyz = raw_data.position_xyz(1:sample_idx, :);
                     vel_norm = vecnorm(raw_data.velocity_xyz(1:sample_idx, :), 2, 2);
@@ -360,9 +390,25 @@ try
                     title(viz_state.vel_ax, sprintf('Velocity Norm (Current: %.2f m/s)', vel_norm(end)));
                     title(viz_state.bat_ax, sprintf('Battery Voltage (Current: %.2f V)', battery_v(end)));
 
+                    % Keep trajectory visually readable even when motion is very small.
+                    if size(pos_xyz, 1) >= 2
+                        span_x = max(pos_xyz(:, 1)) - min(pos_xyz(:, 1));
+                        span_y = max(pos_xyz(:, 2)) - min(pos_xyz(:, 2));
+                        span_z = max(pos_xyz(:, 3)) - min(pos_xyz(:, 3));
+                        if max([span_x, span_y, span_z]) < 0.05
+                            cx = pos_xyz(end, 1);
+                            cy = pos_xyz(end, 2);
+                            cz = pos_xyz(end, 3);
+                            axis(viz_state.traj_ax, [cx-1, cx+1, cy-1, cy+1, cz-1, cz+1]);
+                        else
+                            axis(viz_state.traj_ax, 'auto');
+                        end
+                    end
+
                     drawnow limitrate nocallbacks;
-                catch
-                    % Silent fail to avoid disrupting collection
+                catch ME_viz
+                    fprintf('%s[AutoLandingDataCollection] Visualization update warning: %s\n', log_prefix, ME_viz.message);
+                    viz_state.enabled = false;
                 end
             end
             
@@ -439,6 +485,7 @@ try
     collection_result.duration = t_elapsed;
     collection_result.status = 'completed';
     collection_result.landing_pad_topic_status = landing_pad_publish_status;
+    autlReleaseLandingPadRuntime(landing_pad_runtime);
 
     if mission_config.enable_auto_motion
         autlMavproxyControl('land', struct(), control_cfg);
@@ -505,6 +552,13 @@ catch ME
         collection_result.status = 'error';
         collection_result.error_message = ME.message;
         fprintf('%s[AutoLandingDataCollection] ERROR: %s\n', log_prefix, ME.message);
+end
+
+try
+    if exist('landing_pad_runtime', 'var')
+        autlReleaseLandingPadRuntime(landing_pad_runtime);
+    end
+catch
 end
 
 if mission_config.enable_visualization && mission_config.close_visualization_on_finish
@@ -831,9 +885,9 @@ viz = struct();
 viz.fig = fig_handle;
 
 viz.traj_ax = subplot(2, 2, 1, 'Parent', fig_handle);
-viz.traj_line = plot3(viz.traj_ax, nan, nan, nan, 'b-', 'LineWidth', 1.2);
+viz.traj_line = plot3(viz.traj_ax, nan, nan, nan, 'b.-', 'LineWidth', 1.2, 'MarkerSize', 9);
 hold(viz.traj_ax, 'on');
-viz.traj_head = plot3(viz.traj_ax, nan, nan, nan, 'ro', 'MarkerSize', 8, 'LineWidth', 1.2);
+viz.traj_head = plot3(viz.traj_ax, nan, nan, nan, 'ro', 'MarkerSize', 14, 'LineWidth', 1.5);
 xlabel(viz.traj_ax, 'X (m)'); ylabel(viz.traj_ax, 'Y (m)'); zlabel(viz.traj_ax, 'Z (m)');
 title(viz.traj_ax, '3D Trajectory');
 grid(viz.traj_ax, 'on');
@@ -874,6 +928,42 @@ set(viz.vel_line, 'XData', nan, 'YData', nan);
 set(viz.bat_line, 'XData', nan, 'YData', nan);
 set(viz.status_text, 'String', sprintf('Session: %s\nWaiting for samples...', session_id));
 title(viz.traj_ax, sprintf('3D Trajectory (%s)', session_id), 'Interpreter', 'none');
+end
+
+function viz = autlEnsureRealtimeVizState(viz, session_id)
+% Ensure the cached figure/axes/line handles are still valid and re-create if needed.
+
+required_fields = {'fig','traj_ax','traj_line','traj_head','alt_ax','alt_line','vel_ax','vel_line','bat_ax','bat_line','status_text'};
+is_valid = isstruct(viz);
+if is_valid
+    for i = 1:numel(required_fields)
+        f = required_fields{i};
+        if ~isfield(viz, f) || ~isgraphics(viz.(f))
+            is_valid = false;
+            break;
+        end
+    end
+end
+
+if is_valid
+    viz.enabled = true;
+    return;
+end
+
+fig = [];
+if isstruct(viz) && isfield(viz, 'fig') && isgraphics(viz.fig)
+    fig = viz.fig;
+end
+if isempty(fig)
+    fig = figure('Name', 'AutoLanding Real-time Data Collection', 'NumberTitle', 'off', ...
+        'Tag', 'autl_realtime_collection', 'Position', [100, 100, 1200, 600]);
+else
+    clf(fig);
+end
+
+viz = autlInitRealtimeVizLayout(fig);
+viz = autlResetRealtimeVizLayout(viz, session_id);
+viz.enabled = true;
 end
 end
 
@@ -969,6 +1059,139 @@ pad_spec.center_xyz = mission_config.landing_pad_center;
 pad_spec.size_xy = mission_config.landing_pad_size;
 pad_spec.timestamp = char(datetime('now'));
 autlSaveJson(fullfile(sessionDir, 'landing_pad_spec.json'), pad_spec);
+end
+
+function runtime = autlInitLandingPadRuntime(mission_config, log_prefix)
+% Initialize landing-pad topic follower and Gazebo pose updater.
+
+runtime = struct();
+runtime.follow_enabled = false;
+runtime.ros_ctx = [];
+runtime.sub = [];
+runtime.topic = string(mission_config.landing_pad_topic);
+runtime.last_follow_t = -inf;
+runtime.follow_interval_s = max(0.05, double(mission_config.landing_pad_follow_interval_s));
+runtime.last_center = double(mission_config.landing_pad_center(:)');
+runtime.last_size = double(mission_config.landing_pad_size(:)');
+runtime.base_center = runtime.last_center;
+runtime.apply_set_pose = logical(mission_config.landing_pad_apply_set_pose);
+runtime.pad_model_name = char(string(mission_config.landing_pad_model_name));
+runtime.set_pose_service = '';
+runtime.last_pose_t = -inf;
+runtime.pose_interval_s = runtime.follow_interval_s;
+runtime.warned_follow = false;
+runtime.warned_pose = false;
+runtime.default_motion_enabled = logical(mission_config.landing_pad_enable_default_motion);
+runtime.default_motion_radius_m = max(0.0, double(mission_config.landing_pad_motion_radius_m));
+runtime.default_motion_rate_rad_s = max(0.0, double(mission_config.landing_pad_motion_rate_rad_s));
+runtime.motion_started = false;
+
+if mission_config.landing_pad_follow_topic
+    try
+        rosCtx = autlCreateRosContext("autolanding_pad_follow");
+        if isstruct(rosCtx) && isfield(rosCtx, 'enabled') && rosCtx.enabled
+            runtime.ros_ctx = rosCtx;
+            runtime.sub = ros2subscriber(rosCtx.node, char(runtime.topic), 'std_msgs/Float32MultiArray');
+            runtime.follow_enabled = true;
+            fprintf('%s[AutoLandingDataCollection] Landing pad topic follower enabled: %s\n', log_prefix, char(runtime.topic));
+        else
+            fprintf('%s[AutoLandingDataCollection] Landing pad topic follower disabled (ROS2 unavailable).\n', log_prefix);
+        end
+    catch ME
+        fprintf('%s[AutoLandingDataCollection] Landing pad topic follower unavailable: %s\n', log_prefix, ME.message);
+    end
+end
+
+if runtime.apply_set_pose
+    [svc_status, svc_out] = system('bash -lc ''gz service -l 2>/dev/null | grep -E "^/world/.*/set_pose$" | head -n1''');
+    if svc_status == 0 && strlength(string(strtrim(svc_out))) > 0
+        runtime.set_pose_service = char(string(strtrim(svc_out)));
+    else
+        runtime.apply_set_pose = false;
+        fprintf('%s[AutoLandingDataCollection] Landing pad set_pose disabled: /world/*/set_pose not found.\n', log_prefix);
+    end
+end
+end
+
+function [mission_config, runtime] = autlUpdateLandingPadRuntime(mission_config, runtime, t_elapsed, log_prefix)
+% Follow landing_pad_topic values and move Gazebo landing-pad model accordingly.
+
+if runtime.follow_enabled && ((t_elapsed - runtime.last_follow_t) >= runtime.follow_interval_s)
+    runtime.last_follow_t = t_elapsed;
+    got_topic_update = false;
+    try
+        msg = receive(runtime.sub, 0.01);
+        payload = double(msg.data(:)');
+        if numel(payload) >= 3
+            mission_config.landing_pad_center = payload(1:3);
+            runtime.last_center = mission_config.landing_pad_center;
+            got_topic_update = true;
+            if numel(payload) >= 5
+                mission_config.landing_pad_size = payload(4:5);
+                runtime.last_size = mission_config.landing_pad_size;
+            end
+        end
+    catch ME
+        if ~runtime.warned_follow
+            fprintf('%s[AutoLandingDataCollection] Landing pad topic follow waiting: %s\n', log_prefix, ME.message);
+            runtime.warned_follow = true;
+        end
+    end
+
+    % Keep pad moving even when no external topic publisher is active.
+    if runtime.default_motion_enabled && ~got_topic_update
+        theta = runtime.default_motion_rate_rad_s * t_elapsed;
+        motion_xy = runtime.default_motion_radius_m * [cos(theta), sin(theta)];
+        mission_config.landing_pad_center(1) = runtime.base_center(1) + motion_xy(1);
+        mission_config.landing_pad_center(2) = runtime.base_center(2) + motion_xy(2);
+        mission_config.landing_pad_center(3) = runtime.base_center(3);
+        runtime.last_center = mission_config.landing_pad_center;
+        if ~runtime.motion_started
+            fprintf('%s[AutoLandingDataCollection] Landing pad default motion active (r=%.2fm, w=%.2frad/s)\n', ...
+                log_prefix, runtime.default_motion_radius_m, runtime.default_motion_rate_rad_s);
+            runtime.motion_started = true;
+        end
+    end
+end
+
+if runtime.apply_set_pose && ((t_elapsed - runtime.last_pose_t) >= runtime.pose_interval_s)
+    runtime.last_pose_t = t_elapsed;
+    marker_width_ref_m = 0.4;
+    marker_scale = max(0.25, mission_config.landing_pad_size(1) / marker_width_ref_m);
+    pose_z = mission_config.landing_pad_center(3) + (0.25 * marker_scale);
+    req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
+        'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}'], ...
+        runtime.pad_model_name, mission_config.landing_pad_center(1), mission_config.landing_pad_center(2), pose_z);
+    cmd = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+        runtime.set_pose_service, req);
+    [rc, out] = system(cmd);
+    if ~(rc == 0 && ~contains(lower(string(out)), 'false')) && ~runtime.warned_pose
+        fprintf('%s[AutoLandingDataCollection] Landing pad set_pose warning: rc=%d out=%s\n', log_prefix, rc, strtrim(string(out)));
+        runtime.warned_pose = true;
+    end
+end
+end
+
+function autlReleaseLandingPadRuntime(runtime)
+% Release ROS resources allocated by landing-pad runtime.
+
+if ~isstruct(runtime)
+    return;
+end
+
+try
+    if isfield(runtime, 'sub') && ~isempty(runtime.sub)
+        clear runtime.sub;
+    end
+catch
+end
+
+try
+    if isfield(runtime, 'ros_ctx') && ~isempty(runtime.ros_ctx)
+        autlReleaseRosContext(runtime.ros_ctx);
+    end
+catch
+end
 end
 
 function is_interrupt = autlIsUserInterrupt(ME)
