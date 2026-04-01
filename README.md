@@ -55,6 +55,43 @@ Hover-to-land trajectory objective with marker target:
 
 J_land = sum_t (w_xy ||p_xy,t - p_m,xy||^2 + w_z (z_t - z_m)^2 + w_v ||v_t||^2)
 
+## 2.1 Paper-oriented experimental protocol
+
+This workspace supports the following experimental flow for thesis/paper reporting:
+
+1. Baseline vs proposal:
+- Baseline: Pure AI model
+- Proposal: Ontology+AI hybrid model
+
+2. Multi-worker simulation data collection:
+- Worker-wise scenario collection is supported.
+- Each scenario starts from reset pose/state to reduce inter-scenario leakage.
+
+3. Scenario start behavior:
+- ArduPilot takes off and reaches hover before effective data capture.
+- Landing pad context is published and logged for downstream interpretation.
+
+4. Model-missing fallback:
+- If both learned models are unavailable, baseline tracking trajectory generation is used.
+- This guarantees mission continuity and dataset bootstrapping.
+
+5. Training after collection:
+- Collected raw data are converted to feature/label sets.
+- Pure AI and Ontology+AI models are trained in the same pipeline.
+
+6. Trajectory outputs:
+- Both models produce landing trajectories when available.
+- A compatibility output is also provided as a single preferred trajectory file.
+
+7. Quantitative validation for paper tables:
+- touchdown error (XY/Z), landing time, descent speed, lateral stability
+- trajectory RMSE and path length
+- cross-model comparison summary
+
+8. Explainability intent:
+- Semantic context (wind/vision/state relation) is represented as structured features.
+- The intent is to improve human-interpretability over purely black-box decision paths.
+
 ## 3. Directory layout
 
 - src: semantic feature extraction and trajectory policy code
@@ -96,6 +133,22 @@ Additional ArUco hover-start output (when running `AutoLandingMainFull`):
 
 - data/processed/landing_trajectory_aruco_hover.csv
 - data/processed/landing_trajectory_aruco_hover.json
+
+Model-specific outputs (when available):
+
+- data/processed/landing_trajectory_ontology_ai.csv
+- data/processed/landing_trajectory_ontology_ai.json
+- data/processed/landing_trajectory_pure_ai.csv
+- data/processed/landing_trajectory_pure_ai.json
+
+Fallback output (when both models are unavailable):
+
+- data/processed/landing_trajectory_baseline_tracking.csv
+- data/processed/landing_trajectory_baseline_tracking.json
+
+Quantitative trajectory validation report:
+
+- data/processed/landing_trajectory_model_validation.json
 
 ArUco setup tutorial and ROS2 bridge commands:
 

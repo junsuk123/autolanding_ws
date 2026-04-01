@@ -230,6 +230,13 @@ function AutoLandingMainFull(varargin)
         mission_overrides.landing_pad_center = landing_pad_center;
         mission_overrides.landing_pad_size = landing_pad_size;
         mission_overrides.landing_pad_topic = landing_pad_topic;
+        mission_overrides.reset_pose_each_scenario = true;
+        mission_overrides.reset_spawn_xy = spawn_xy;
+        mission_overrides.reset_spawn_z_m = 0.195;
+        mission_overrides.reset_spawn_yaw_deg = 90.0;
+        mission_overrides.reset_model_name = 'iris_with_gimbal';
+        mission_overrides.reset_ardupilot_each_scenario = true;
+        mission_overrides.reset_mode_sequence = {'STABILIZE', 'GUIDED'};
         collection_result = AutoLandingDataParallel(num_workers, scenarios_per_worker, gazebo_server_mode, enable_visualization, mission_overrides);
         collection_dir = collection_result{1};  % Session directory
         num_collected = collection_result{2};   % Number of scenarios collected
@@ -290,21 +297,114 @@ function AutoLandingMainFull(varargin)
                                         comparison_result, rootDir, use_ontology_model, use_pure_ai_model);
         end
 
-        %% STEP 7: Generate Hover-to-Land Trajectory (ArUco pad target)
-        fprintf('\n[Pipeline] STEP 6: Generate Hover-to-Land Trajectory\n');
+        %% STEP 7: Generate model-specific hover-to-land trajectories and validation report
+        fprintf('\n[Pipeline] STEP 6: Generate Hover-to-Land Trajectories\n');
         fprintf('════════════════════════════════════════════\n');
         cfg_traj = autlDefaultConfig();
         hover_initial = struct('x', spawn_xy(1), 'y', spawn_xy(2), 'z', takeoff_height_m);
         pad_target = struct('x', landing_pad_center(1), 'y', landing_pad_center(2), 'z', landing_pad_center(3));
-        fused_stub = struct('fused_confidence', 0.90);
-        aruco_traj = autlGenerateTrajectory(hover_initial, pad_target, fused_stub, cfg_traj);
-        aruco_traj_csv = fullfile(rootDir, 'data', 'processed', 'landing_trajectory_aruco_hover.csv');
-        aruco_traj_json = fullfile(rootDir, 'data', 'processed', 'landing_trajectory_aruco_hover.json');
+
+        processed_dir = fullfile(rootDir, 'data', 'processed');
+        if ~exist(processed_dir, 'dir')
+            mkdir(processed_dir);
+        end
+
+        ref_feature = autlBuildReferenceFeatureVector(X_train, X_val);
+        traj_reports = struct([]);
+        report_idx = 0;
+
+        if use_ontology_model && ~isempty(model_onto_ai)
+            [onto_conf, onto_src] = autlEstimateModelConfidence(model_onto_ai, ref_feature, 0.90);
+            traj_onto = autlGenerateTrajectory(hover_initial, pad_target, struct('fused_confidence', onto_conf), cfg_traj);
+            out_csv = fullfile(processed_dir, 'landing_trajectory_ontology_ai.csv');
+            out_json = fullfile(processed_dir, 'landing_trajectory_ontology_ai.json');
+            autlWriteTrajectoryCsv(out_csv, traj_onto);
+            onto_metrics = autlEvaluateLandingTrajectory(traj_onto, pad_target);
+            autlSaveJson(out_json, struct('model', 'ontology_ai', 'confidence', onto_conf, ...
+                'confidence_source', onto_src, 'spawn_xy', spawn_xy, 'hover_alt_m', takeoff_height_m, ...
+                'pad_center', landing_pad_center, 'pad_size', landing_pad_size, ...
+                'metrics', onto_metrics, 'trajectory', table2struct(traj_onto)));
+            fprintf('[Pipeline] Ontology+AI trajectory saved: %s (confidence=%.3f, source=%s)\n', out_csv, onto_conf, onto_src);
+
+            report_idx = report_idx + 1;
+            traj_reports(report_idx).model = 'ontology_ai';
+            traj_reports(report_idx).confidence = onto_conf;
+            traj_reports(report_idx).confidence_source = onto_src;
+            traj_reports(report_idx).csv_path = out_csv;
+            traj_reports(report_idx).json_path = out_json;
+            traj_reports(report_idx).metrics = onto_metrics;
+            traj_reports(report_idx).trajectory = traj_onto;
+        end
+
+        if use_pure_ai_model && ~isempty(model_pure_ai)
+            [pure_conf, pure_src] = autlEstimateModelConfidence(model_pure_ai, ref_feature, 0.70);
+            traj_pure = autlGenerateTrajectory(hover_initial, pad_target, struct('fused_confidence', pure_conf), cfg_traj);
+            out_csv = fullfile(processed_dir, 'landing_trajectory_pure_ai.csv');
+            out_json = fullfile(processed_dir, 'landing_trajectory_pure_ai.json');
+            autlWriteTrajectoryCsv(out_csv, traj_pure);
+            pure_metrics = autlEvaluateLandingTrajectory(traj_pure, pad_target);
+            autlSaveJson(out_json, struct('model', 'pure_ai', 'confidence', pure_conf, ...
+                'confidence_source', pure_src, 'spawn_xy', spawn_xy, 'hover_alt_m', takeoff_height_m, ...
+                'pad_center', landing_pad_center, 'pad_size', landing_pad_size, ...
+                'metrics', pure_metrics, 'trajectory', table2struct(traj_pure)));
+            fprintf('[Pipeline] Pure AI trajectory saved: %s (confidence=%.3f, source=%s)\n', out_csv, pure_conf, pure_src);
+
+            report_idx = report_idx + 1;
+            traj_reports(report_idx).model = 'pure_ai';
+            traj_reports(report_idx).confidence = pure_conf;
+            traj_reports(report_idx).confidence_source = pure_src;
+            traj_reports(report_idx).csv_path = out_csv;
+            traj_reports(report_idx).json_path = out_json;
+            traj_reports(report_idx).metrics = pure_metrics;
+            traj_reports(report_idx).trajectory = traj_pure;
+        end
+
+        if isempty(traj_reports)
+            fprintf('[Pipeline] No trained model available. Falling back to baseline tracking trajectory.\n');
+            base_conf = cfg_traj.validation.decision_threshold;
+            base_traj = autlGenerateTrajectory(hover_initial, pad_target, struct('fused_confidence', base_conf), cfg_traj);
+            out_csv = fullfile(processed_dir, 'landing_trajectory_baseline_tracking.csv');
+            out_json = fullfile(processed_dir, 'landing_trajectory_baseline_tracking.json');
+            autlWriteTrajectoryCsv(out_csv, base_traj);
+            base_metrics = autlEvaluateLandingTrajectory(base_traj, pad_target);
+            autlSaveJson(out_json, struct('model', 'baseline_tracking', 'confidence', base_conf, ...
+                'confidence_source', 'fallback_threshold', 'spawn_xy', spawn_xy, 'hover_alt_m', takeoff_height_m, ...
+                'pad_center', landing_pad_center, 'pad_size', landing_pad_size, ...
+                'metrics', base_metrics, 'trajectory', table2struct(base_traj)));
+
+            traj_reports = struct('model', 'baseline_tracking', 'confidence', base_conf, ...
+                'confidence_source', 'fallback_threshold', 'csv_path', out_csv, 'json_path', out_json, ...
+                'metrics', base_metrics, 'trajectory', base_traj);
+            fprintf('[Pipeline] Baseline tracking trajectory saved: %s\n', out_csv);
+        end
+
+        % Keep legacy single-file output for downstream compatibility.
+        preferred_idx = 1;
+        for i = 1:numel(traj_reports)
+            if strcmpi(traj_reports(i).model, 'ontology_ai')
+                preferred_idx = i;
+                break;
+            end
+        end
+        aruco_traj = traj_reports(preferred_idx).trajectory;
+        aruco_traj_csv = fullfile(processed_dir, 'landing_trajectory_aruco_hover.csv');
+        aruco_traj_json = fullfile(processed_dir, 'landing_trajectory_aruco_hover.json');
         autlWriteTrajectoryCsv(aruco_traj_csv, aruco_traj);
-        autlSaveJson(aruco_traj_json, struct('marker_id', aruco_marker_id, 'spawn_xy', spawn_xy, ...
-            'hover_alt_m', takeoff_height_m, 'pad_center', landing_pad_center, 'pad_size', landing_pad_size, ...
+        autlSaveJson(aruco_traj_json, struct('model', traj_reports(preferred_idx).model, ...
+            'confidence', traj_reports(preferred_idx).confidence, ...
+            'confidence_source', traj_reports(preferred_idx).confidence_source, ...
+            'marker_id', aruco_marker_id, 'spawn_xy', spawn_xy, 'hover_alt_m', takeoff_height_m, ...
+            'pad_center', landing_pad_center, 'pad_size', landing_pad_size, ...
+            'metrics', traj_reports(preferred_idx).metrics, ...
             'trajectory', table2struct(aruco_traj)));
-        fprintf('[Pipeline] ArUco landing trajectory saved: %s\n', aruco_traj_csv);
+
+        validation_report = struct();
+        validation_report.experiment = 'model_trajectory_landing_validation';
+        validation_report.models = traj_reports;
+        validation_report.comparison = autlBuildTrajectoryComparison(traj_reports);
+        validation_report_path = fullfile(processed_dir, 'landing_trajectory_model_validation.json');
+        autlSaveJson(validation_report_path, validation_report);
+        fprintf('[Pipeline] Trajectory validation report saved: %s\n', validation_report_path);
         
         %% FINAL SUMMARY
         fprintf('\n');
@@ -314,6 +414,7 @@ function AutoLandingMainFull(varargin)
         fprintf('\nOUTPUT FILES:\n');
         fprintf('  - Raw Data: %s\n', collection_dir);
         fprintf('  - ArUco Trajectory: %s\n', aruco_traj_csv);
+        fprintf('  - Trajectory Validation: %s\n', validation_report_path);
         fprintf('  - Models: %s/models/\n', rootDir);
         fprintf('  - Plots: %s/plots/\n', rootDir);
         fprintf('  - Analysis: %s/analysis/\n', rootDir);
@@ -413,5 +514,144 @@ try
     fprintf('[Pipeline.cleanup] Cleanup complete.\n');
 catch
     % Silent fail to not interfere with cleanup
+end
+
+function x_ref = autlBuildReferenceFeatureVector(X_train, X_val)
+% Build a representative normalized feature vector for model-conditioned trajectory generation.
+
+if nargin < 1
+    X_train = [];
+end
+if nargin < 2
+    X_val = [];
+end
+
+if ~isempty(X_train)
+    x_ref = mean(X_train, 1);
+elseif ~isempty(X_val)
+    x_ref = X_val(1, :);
+else
+    x_ref = zeros(1, 14);
+end
+end
+
+function [confidence, source] = autlEstimateModelConfidence(model, x_ref, default_conf)
+% Estimate landing confidence from model output, with safe fallback.
+
+if nargin < 3
+    default_conf = 0.70;
+end
+
+confidence = autlClamp(default_conf, 0.05, 0.98);
+source = 'default';
+
+if isempty(model) || ~isfield(model, 'classifier') || isempty(model.classifier) || isempty(x_ref)
+    return;
+end
+
+try
+    if isfield(model, 'is_nn') && model.is_nn
+        nn_out = model.classifier(double(x_ref(:))');
+        nn_out = double(nn_out(:));
+        if numel(nn_out) >= 2
+            positive = max(nn_out(2), 0);
+            total = max(sum(max(nn_out, 0)), 1e-6);
+            confidence = autlClamp(positive / total, 0.05, 0.98);
+            source = 'nn_score';
+            return;
+        end
+    end
+
+    try
+        [pred_label, score] = predict(model.classifier, x_ref);
+        if ~isempty(score) && size(score, 2) >= 2
+            confidence = autlClamp(double(score(1, 2)), 0.05, 0.98);
+            source = 'classifier_score';
+            return;
+        end
+        pred_label = double(pred_label(1));
+        if pred_label >= 1
+            confidence = autlClamp(default_conf + 0.10, 0.05, 0.98);
+        else
+            confidence = autlClamp(default_conf - 0.20, 0.05, 0.98);
+        end
+        source = 'classifier_label';
+    catch
+        % Keep default if classifier does not expose score API.
+    end
+catch
+    % Keep default on estimation failures.
+end
+end
+
+function metrics = autlEvaluateLandingTrajectory(trajTbl, targetState)
+% Compute landing-centric metrics for paper-ready model comparison.
+
+metrics = autlEvaluateTrajectoryMetrics(trajTbl, targetState);
+
+if isempty(trajTbl)
+    metrics.total_time_s = nan;
+    metrics.mean_descent_speed_ms = nan;
+    metrics.touchdown_vertical_speed_ms = nan;
+    metrics.lateral_speed_stability = nan;
+    return;
+end
+
+metrics.total_time_s = double(trajTbl.t(end));
+
+if ismember('vz_cmd', trajTbl.Properties.VariableNames)
+    vz = double(trajTbl.vz_cmd);
+    descent_mask = vz < 0;
+    if any(descent_mask)
+        metrics.mean_descent_speed_ms = mean(abs(vz(descent_mask)));
+    else
+        metrics.mean_descent_speed_ms = 0.0;
+    end
+    metrics.touchdown_vertical_speed_ms = abs(vz(end));
+else
+    metrics.mean_descent_speed_ms = nan;
+    metrics.touchdown_vertical_speed_ms = nan;
+end
+
+if ismember('vx_cmd', trajTbl.Properties.VariableNames) && ismember('vy_cmd', trajTbl.Properties.VariableNames)
+    vxy = hypot(double(trajTbl.vx_cmd), double(trajTbl.vy_cmd));
+    metrics.lateral_speed_stability = std(vxy);
+else
+    metrics.lateral_speed_stability = nan;
+end
+end
+
+function comp = autlBuildTrajectoryComparison(traj_reports)
+% Build summary comparison values across model trajectories.
+
+comp = struct();
+comp.num_models = numel(traj_reports);
+comp.best_touchdown_error_model = '';
+comp.best_touchdown_error_xy_m = nan;
+comp.fastest_landing_model = '';
+comp.fastest_total_time_s = nan;
+
+if isempty(traj_reports)
+    return;
+end
+
+touchdown_err = nan(numel(traj_reports), 1);
+landing_time = nan(numel(traj_reports), 1);
+for i = 1:numel(traj_reports)
+    touchdown_err(i) = traj_reports(i).metrics.touchdown_error_xy;
+    landing_time(i) = traj_reports(i).metrics.total_time_s;
+end
+
+[min_err, idx_err] = min(touchdown_err);
+[min_time, idx_time] = min(landing_time);
+
+if ~isempty(idx_err) && isfinite(min_err)
+    comp.best_touchdown_error_model = traj_reports(idx_err).model;
+    comp.best_touchdown_error_xy_m = min_err;
+end
+if ~isempty(idx_time) && isfinite(min_time)
+    comp.fastest_landing_model = traj_reports(idx_time).model;
+    comp.fastest_total_time_s = min_time;
+end
 end
 end

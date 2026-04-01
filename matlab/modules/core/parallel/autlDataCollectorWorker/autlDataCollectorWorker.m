@@ -51,6 +51,12 @@ end
 if ~isfield(config, 'enable_visualization')
     config.enable_visualization = true;  % Default: enable visualization
 end
+if ~isfield(config, 'reset_pose_each_scenario')
+    config.reset_pose_each_scenario = true;
+end
+if ~isfield(config, 'reset_ardupilot_each_scenario')
+    config.reset_ardupilot_each_scenario = true;
+end
 
 % Create worker output directory
 if ~exist(config.worker_log_dir, 'dir')
@@ -104,9 +110,41 @@ try
                 mission_cfg.(f_name) = config.mission_overrides.(f_name);
             end
         end
+        if ~isfield(mission_cfg, 'reset_pose_each_scenario')
+            mission_cfg.reset_pose_each_scenario = config.reset_pose_each_scenario;
+        end
+        if ~isfield(mission_cfg, 'reset_ardupilot_each_scenario')
+            mission_cfg.reset_ardupilot_each_scenario = config.reset_ardupilot_each_scenario;
+        end
         if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1
             mission_cfg.enable_auto_motion = false;
             fprintf(log_fid, '[Worker %d] Auto motion disabled to avoid multi-worker MAVLink command conflicts.\n', worker_id);
+        end
+
+        if mission_cfg.reset_pose_each_scenario
+            [reset_ok, reset_msg] = autlResetGazeboDronePose(mission_cfg);
+            if reset_ok
+                fprintf('[Worker %d] Scenario %d pose reset applied: %s\n', worker_id, scenario_num, reset_msg);
+                fprintf(log_fid, '[Worker %d] Scenario %d pose reset applied: %s\n', worker_id, scenario_num, reset_msg);
+            else
+                fprintf('[Worker %d] Scenario %d pose reset skipped/failed: %s\n', worker_id, scenario_num, reset_msg);
+                fprintf(log_fid, '[Worker %d] Scenario %d pose reset skipped/failed: %s\n', worker_id, scenario_num, reset_msg);
+            end
+        end
+
+        if mission_cfg.reset_ardupilot_each_scenario
+            [ap_ok, ap_msg] = autlResetArduPilotState(mission_cfg);
+            if ap_ok
+                fprintf('[Worker %d] Scenario %d ArduPilot reset applied: %s\n', worker_id, scenario_num, ap_msg);
+                fprintf(log_fid, '[Worker %d] Scenario %d ArduPilot reset applied: %s\n', worker_id, scenario_num, ap_msg);
+            else
+                fprintf('[Worker %d] Scenario %d ArduPilot reset warning: %s\n', worker_id, scenario_num, ap_msg);
+                fprintf(log_fid, '[Worker %d] Scenario %d ArduPilot reset warning: %s\n', worker_id, scenario_num, ap_msg);
+            end
+        end
+
+        if mission_cfg.reset_pose_each_scenario || mission_cfg.reset_ardupilot_each_scenario
+            pause(0.5);
         end
         
         % Raw data collection (NO ontology processing)
@@ -136,15 +174,6 @@ try
             fprintf(log_fid, '[Worker %d] Scenario %d collected: %d samples in %.1f sec\n', ...
                 worker_id, scenario_num, samples, duration);
             scenario_success_count = scenario_success_count + 1;
-            
-            % Optional extra worker-side visualization (disabled by default).
-            if config.enable_realtime_viz && config.enable_visualization && scenario_num == 1
-                try
-                    autlVisualizeMissionRealtime(mission_cfg.session_id, 1.0);
-                catch
-                    fprintf(log_fid, '[Worker %d] Visualization skipped for scenario %d\n', worker_id, scenario_num);
-                end
-            end
             
         catch ME
             if autlWorkerIsUserInterrupt(ME)
@@ -178,6 +207,7 @@ catch ME
     else
         fprintf(log_fid, '[Worker %d] CRITICAL ERROR: %s\n', worker_id, ME.message);
         fprintf(log_fid, '%s\n', getReport(ME));
+        rethrow(ME);
     end
 end
 
@@ -233,5 +263,128 @@ try
 catch
     % Silent fail
 end
+
+end
+
+function [ok, msg] = autlResetGazeboDronePose(mission_cfg)
+% Reset drone pose via Gazebo service before each scenario.
+
+ok = false;
+msg = '';
+
+if ~isfield(mission_cfg, 'landing_pad_center')
+    mission_cfg.landing_pad_center = [0.0, 0.0, 0.0];
+end
+if ~isfield(mission_cfg, 'spawn_radius_m')
+    mission_cfg.spawn_radius_m = 0.8;
+end
+if ~isfield(mission_cfg, 'spawn_angle_deg')
+    mission_cfg.spawn_angle_deg = 35.0;
+end
+if ~isfield(mission_cfg, 'reset_spawn_z_m')
+    mission_cfg.reset_spawn_z_m = 0.195;
+end
+if ~isfield(mission_cfg, 'reset_spawn_yaw_deg')
+    mission_cfg.reset_spawn_yaw_deg = 90.0;
+end
+if ~isfield(mission_cfg, 'reset_model_name')
+    mission_cfg.reset_model_name = 'iris_with_gimbal';
+end
+
+if isfield(mission_cfg, 'reset_spawn_xy') && numel(mission_cfg.reset_spawn_xy) >= 2
+    spawn_x = mission_cfg.reset_spawn_xy(1);
+    spawn_y = mission_cfg.reset_spawn_xy(2);
+else
+    ang = deg2rad(mission_cfg.spawn_angle_deg);
+    spawn_x = mission_cfg.landing_pad_center(1) + mission_cfg.spawn_radius_m * cos(ang);
+    spawn_y = mission_cfg.landing_pad_center(2) + mission_cfg.spawn_radius_m * sin(ang);
+end
+
+yaw_rad = deg2rad(mission_cfg.reset_spawn_yaw_deg);
+qz = sin(yaw_rad / 2.0);
+qw = cos(yaw_rad / 2.0);
+
+[svc_status, svc_out] = system('bash -lc ''gz service -l 2>/dev/null | grep -E "^/world/.*/set_pose$" | head -n1''');
+if svc_status ~= 0 || strlength(string(strtrim(svc_out))) == 0
+    msg = 'No /world/*/set_pose service found.';
+    return;
+end
+
+svc_name = strtrim(svc_out);
+name_candidates = {char(string(mission_cfg.reset_model_name)), 'iris', 'iris_with_gimbal_0'};
+name_candidates = unique(name_candidates, 'stable');
+
+for i = 1:numel(name_candidates)
+    entity_name = name_candidates{i};
+    req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
+        'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
+        entity_name, spawn_x, spawn_y, mission_cfg.reset_spawn_z_m, qz, qw);
+
+    cmd = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 3000 --req ''''''%s'''''' 2>/dev/null''', ...
+        svc_name, req);
+    [rc, out] = system(cmd);
+    out_l = lower(string(out));
+    if rc == 0 && (~contains(out_l, 'false'))
+        ok = true;
+        msg = sprintf('service=%s entity=%s spawn=[%.2f, %.2f, %.2f] yaw=%.1fdeg', ...
+            svc_name, entity_name, spawn_x, spawn_y, mission_cfg.reset_spawn_z_m, mission_cfg.reset_spawn_yaw_deg);
+        return;
+    end
+end
+
+msg = sprintf('set_pose failed for candidates on %s', svc_name);
+end
+
+function [ok, msg] = autlResetArduPilotState(mission_cfg)
+% Force ArduPilot into a clean state between scenarios.
+
+ok = false;
+parts = strings(0, 1);
+
+master_conn = 'tcp:127.0.0.1:5762';
+if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
+    master_conn = char(string(mission_cfg.mavlink_master));
+end
+
+mode_sequence = {'GUIDED'};
+if isfield(mission_cfg, 'reset_mode_sequence') && ~isempty(mission_cfg.reset_mode_sequence)
+    if iscell(mission_cfg.reset_mode_sequence)
+        mode_sequence = mission_cfg.reset_mode_sequence;
+    else
+        mode_sequence = {char(string(mission_cfg.reset_mode_sequence))};
+    end
+end
+
+ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+
+disarm_res = autlMavproxyControl('disarm', struct(), ctrl_cfg);
+if disarm_res.is_success
+    parts(end+1) = "disarm=ok"; %#ok<AGROW>
+else
+    emsg = strtrim(string(disarm_res.error_message));
+    if strlength(emsg) == 0
+        emsg = "unknown";
+    end
+    parts(end+1) = "disarm=warn(" + emsg + ")"; %#ok<AGROW>
+end
+
+mode_all_ok = true;
+for mi = 1:numel(mode_sequence)
+    target_mode = char(string(mode_sequence{mi}));
+    mode_res = autlMavproxyControl('set_mode', struct('mode', target_mode), ctrl_cfg);
+    if mode_res.is_success
+        parts(end+1) = "mode=" + string(target_mode) + "(ok)"; %#ok<AGROW>
+    else
+        mode_all_ok = false;
+        emsg = strtrim(string(mode_res.error_message));
+        if strlength(emsg) == 0
+            emsg = "unknown";
+        end
+        parts(end+1) = "mode=" + string(target_mode) + "(warn:" + emsg + ")"; %#ok<AGROW>
+    end
+end
+
+ok = mode_all_ok;
+msg = char(strjoin(parts, ', '));
 end
 

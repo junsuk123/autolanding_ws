@@ -39,6 +39,12 @@ end
 if ~isfield(mission_config, 'save_realtime_viz_snapshot')
     mission_config.save_realtime_viz_snapshot = false;
 end
+if ~isfield(mission_config, 'close_visualization_on_finish')
+    mission_config.close_visualization_on_finish = true;
+end
+if ~isfield(mission_config, 'force_close_stale_visualizations')
+    mission_config.force_close_stale_visualizations = true;
+end
 if ~isfield(mission_config, 'log_prefix')
     mission_config.log_prefix = '';
 end
@@ -134,9 +140,17 @@ fprintf('%s[AutoLandingDataCollection] Landing Pad Center: [%.2f, %.2f, %.2f], S
 % Setup real-time visualization if enabled
 fig_handle = [];
 viz_state = struct('enabled', false);
+persistent autl_viz_cache
 if mission_config.enable_visualization
     try
-        persistent autl_viz_cache
+        if mission_config.force_close_stale_visualizations
+            keep_fig = [];
+            if ~isempty(autl_viz_cache) && isstruct(autl_viz_cache) && isfield(autl_viz_cache, 'fig') && isgraphics(autl_viz_cache.fig)
+                keep_fig = autl_viz_cache.fig;
+            end
+            autlCloseStaleRealtimeFigures(keep_fig);
+        end
+
         need_new_figure = true;
         if mission_config.reuse_visualization_window && ~isempty(autl_viz_cache) && ...
                 isstruct(autl_viz_cache) && isfield(autl_viz_cache, 'fig') && isgraphics(autl_viz_cache.fig)
@@ -145,8 +159,7 @@ if mission_config.enable_visualization
 
         if need_new_figure
             fig_handle = figure('Name', 'AutoLanding Real-time Data Collection', 'NumberTitle', 'off', ...
-                'Position', [100, 100, 1200, 600]);
-            set(fig_handle, 'CloseRequestFcn', @(src, ~) set(src, 'Visible', 'off'));
+                'Tag', 'autl_realtime_collection', 'Position', [100, 100, 1200, 600]);
             autl_viz_cache = autlInitRealtimeVizLayout(fig_handle);
         else
             fig_handle = autl_viz_cache.fig;
@@ -206,12 +219,18 @@ try
                 fprintf('%s[AutoLandingDataCollection] Warning: takeoff failed: %s\n', log_prefix, takeoff_res.error_message);
             else
                 fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted\n', log_prefix);
+                [hover_ok, hover_msg] = autlWaitForHoverState(mav_config, mission_config.takeoff_height_m, 20.0);
+                if hover_ok
+                    fprintf('%s[AutoLandingDataCollection] Hover stabilization ready: %s\n', log_prefix, hover_msg);
+                else
+                    fprintf('%s[AutoLandingDataCollection] Warning: hover stabilization timeout: %s\n', log_prefix, hover_msg);
+                end
             end
         else
             control_state.takeoff_sent = false;
             fprintf('%s[AutoLandingDataCollection] Warning: skipping takeoff because arming failed\n', log_prefix);
         end
-        pause(2.0);
+        pause(0.5);
     else
         fprintf('%s[AutoLandingDataCollection] Auto motion control: DISABLED\n', log_prefix);
         control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
@@ -434,6 +453,16 @@ try
             % Silent fail
         end
     end
+
+    if mission_config.enable_visualization && mission_config.close_visualization_on_finish
+        if ~isempty(fig_handle) && isgraphics(fig_handle)
+            try
+                delete(fig_handle);
+            catch
+            end
+        end
+        autl_viz_cache = [];
+    end
     
 catch ME
     % Check if this is user interruption (Ctrl+C)
@@ -470,6 +499,35 @@ catch ME
         collection_result.status = 'error';
         collection_result.error_message = ME.message;
         fprintf('%s[AutoLandingDataCollection] ERROR: %s\n', log_prefix, ME.message);
+end
+
+if mission_config.enable_visualization && mission_config.close_visualization_on_finish
+    if ~isempty(fig_handle) && isgraphics(fig_handle)
+        try
+            delete(fig_handle);
+        catch
+        end
+    end
+    autl_viz_cache = [];
+end
+end
+
+function autlCloseStaleRealtimeFigures(keep_fig)
+% Delete leaked realtime collection figures so worker iterations do not accumulate GUI handles.
+
+if nargin < 1
+    keep_fig = [];
+end
+
+try
+    figs = findall(0, 'Type', 'figure', 'Tag', 'autl_realtime_collection');
+    for i = 1:numel(figs)
+        if isempty(keep_fig) || ~isequal(figs(i), keep_fig)
+            delete(figs(i));
+        end
+    end
+catch
+    % Silent fail
 end
 end
 
@@ -945,6 +1003,62 @@ try
     end
 catch
     % Silent fail to avoid interfering with cleanup process
+end
+end
+
+function [ok, msg] = autlWaitForHoverState(mav_config, target_alt_m, timeout_s)
+% Wait until the vehicle reaches and briefly holds near target altitude.
+
+ok = false;
+msg = '';
+if nargin < 3
+    timeout_s = 20.0;
+end
+
+alt_tol_m = 0.6;
+vz_tol_ms = 0.5;
+stable_required_s = 1.5;
+
+t0 = tic;
+stable_t0 = -inf;
+last_alt = nan;
+last_vz = nan;
+last_mode = "UNKNOWN";
+
+while toc(t0) < timeout_s
+    st = autlGetVehicleState(mav_config);
+    last_mode = string(st.mode);
+    if strcmpi(last_mode, "NO_LINK")
+        pause(0.2);
+        continue;
+    end
+
+    alt_m = abs(double(st.position(3)));
+    vz_ms = abs(double(st.velocity(3)));
+    last_alt = alt_m;
+    last_vz = vz_ms;
+
+    near_alt = abs(alt_m - target_alt_m) <= alt_tol_m;
+    near_hover = vz_ms <= vz_tol_ms;
+    if near_alt && near_hover
+        if stable_t0 < 0
+            stable_t0 = toc(t0);
+        elseif (toc(t0) - stable_t0) >= stable_required_s
+            ok = true;
+            msg = sprintf('alt=%.2fm vz=%.2fm/s mode=%s', alt_m, vz_ms, char(last_mode));
+            return;
+        end
+    else
+        stable_t0 = -inf;
+    end
+
+    pause(0.2);
+end
+
+if isnan(last_alt)
+    msg = sprintf('no telemetry link within %.1fs', timeout_s);
+else
+    msg = sprintf('last alt=%.2fm vz=%.2fm/s mode=%s', last_alt, last_vz, char(last_mode));
 end
 end
 
