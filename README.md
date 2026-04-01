@@ -883,6 +883,32 @@ autolanding_ws/data/processed/
 └── mission_telemetry_log.mat            # MATLAB structure with telemetry
 ```
 
+### 7.4 RViz observability and multi-drone parallel collection
+
+Use these utilities to visualize camera/ArUco/drone state and run meaningful parallel collection with worker-specific states.
+
+```bash
+# Terminal 1: Gazebo world
+gz sim -v4 -r iris_runway.sdf
+
+# Terminal 2: Multi-SITL instances (I0..I2 by default)
+bash scripts/launch_multi_drone_sitl.sh 3
+
+# Terminal 3: RViz + bridge + aruco detector (domain auto-detect; override with --domain 21)
+bash scripts/launch_rviz_monitor.sh --domain auto
+
+# Terminal 4: MATLAB full pipeline
+bash scripts/run_pipeline_matlab.sh
+```
+
+Notes:
+
+- `scripts/launch_rviz_monitor.sh` sources local overlays if present (`/opt/ros/humble`, `~/gz_ros2_aruco_ws`, `~/SynologyDrive/INCSL/devel/INCSL/IICC26_ws`) and exports `ROS_DOMAIN_ID` safely.
+- `AutoLandingMainFull` now builds worker-specific profiles (`worker_profiles`) with different MAVLink ports, spawn offsets, and motion profiles (`aggressive`, `conservative`, `orbit-heavy`, `balanced`).
+- Worker MAVLink mapping follows ArduPilot instance offsets: worker `i` uses `tcp:127.0.0.1:(5762 + 10*(i-1))` with fallback `5760 + 10*(i-1)`.
+- RViz monitor launches a MAVLink-to-ROS odometry publisher and exposes namespaced topics: `/drone1/odom`, `/drone2/odom`, ...
+- World generation is now multi-drone aware: generated world includes one iris model per worker using profile-based spawn/yaw/model-name values.
+
 ## 8. Next integration targets
 
 - Replace heuristic semantic encoder with GNN/transformer encoder

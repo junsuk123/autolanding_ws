@@ -33,10 +33,15 @@ function AutoLandingMainFull(varargin)
     end
     
     % Data Collection Settings
-    num_workers = 1;                    % Number of parallel workers (use 1 to avoid MAVProxy contention)
-    scenarios_per_worker = 20;           % Scenarios per worker (total = num_workers * scenarios_per_worker)
+    num_workers = 3;                    % Number of parallel workers (use 1 to avoid MAVProxy contention)
+    scenarios_per_worker = 200;           % Scenarios per worker (total = num_workers * scenarios_per_worker)
     enable_auto_motion = true;          % Send MAVLink velocity setpoints during collection
     takeoff_height_m = 3.0;             % Takeoff altitude used before motion commands
+    enable_multi_drone_profiles = true; % Enable worker-specific MAVLink/model/spawn/motion profiles
+
+    % RViz / ROS observability
+    enable_rviz_monitor = true;
+    rviz_ros_domain_id = 'auto';        % 'auto' or numeric string (e.g., '21')
 
     % ArUco landing pad configuration
     use_aruco_landing_pad = true;
@@ -83,8 +88,10 @@ function AutoLandingMainFull(varargin)
     fprintf('    - Scenarios/Worker: %d\n', scenarios_per_worker);
     fprintf('    - Total Scenarios: %d\n', num_workers * scenarios_per_worker);
     fprintf('    - Auto Motion: %s (takeoff=%.1fm)\n', char(string(enable_auto_motion)), takeoff_height_m);
+    fprintf('    - Multi-drone Profiles: %s\n', char(string(enable_multi_drone_profiles)));
     fprintf('    - Landing Pad Topic: %s\n', landing_pad_topic);
     fprintf('    - ArUco Enabled: %s (id=%d)\n', char(string(use_aruco_landing_pad)), aruco_marker_id);
+    fprintf('    - RViz Monitor: %s (ROS_DOMAIN_ID=%s)\n', char(string(enable_rviz_monitor)), char(string(rviz_ros_domain_id)));
     fprintf('    - Landing Pad Center: [%.2f, %.2f, %.2f]\n', landing_pad_center(1), landing_pad_center(2), landing_pad_center(3));
     fprintf('    - Landing Pad Size: [%.2f x %.2f] m\n', landing_pad_size(1), landing_pad_size(2));
     fprintf('    - Drone Spawn Radius: %.2f m (<= 1.0 m)\n', spawn_radius_m);
@@ -141,11 +148,16 @@ function AutoLandingMainFull(varargin)
             error('Spawn position exceeds 1 m radius from marker center.');
         end
 
+        worker_profiles = struct([]);
+        if enable_multi_drone_profiles
+            worker_profiles = autlBuildWorkerProfiles(num_workers, spawn_xy, spawn_yaw_deg, takeoff_height_m, landing_pad_center, landing_pad_size);
+        end
+
         world_path_to_launch = base_world_path;
         if use_aruco_landing_pad
             generated_world_path = fullfile('/tmp', 'iris_runway_aruco_landing.sdf');
             autlCreateArucoLandingWorld(base_world_path, generated_world_path, aruco_pkg_dir, ...
-                landing_pad_center, marker_size_m, spawn_xy, spawn_yaw_deg, aruco_marker_id);
+                landing_pad_center, marker_size_m, spawn_xy, spawn_yaw_deg, aruco_marker_id, num_workers, worker_profiles);
             world_path_to_launch = generated_world_path;
             fprintf('[Pipeline] ArUco world generated: %s\n', world_path_to_launch);
         end
@@ -211,9 +223,19 @@ function AutoLandingMainFull(varargin)
         end
         pause(10);
         
-        % Start ArduPilot SITL
+        % Start ArduPilot SITL (single or multi-drone)
         fprintf('[Pipeline] Starting ArduPilot SITL...\n');
-        ap_cmd = sprintf('nohup $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 > /tmp/ardupilot_sitl.log 2>&1 &');
+        if enable_multi_drone_profiles
+            launch_multi_sitl = fullfile(rootDir, 'scripts', 'launch_multi_drone_sitl.sh');
+            if isfile(launch_multi_sitl)
+                ap_cmd = sprintf('bash -lc ''"%s" %d > /tmp/autolanding_multi_sitl.log 2>&1''', launch_multi_sitl, num_workers);
+            else
+                warning('Multi-drone SITL launcher not found: %s. Falling back to single instance.', launch_multi_sitl);
+                ap_cmd = sprintf('nohup $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 > /tmp/ardupilot_sitl.log 2>&1 &');
+            end
+        else
+            ap_cmd = sprintf('nohup $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 > /tmp/ardupilot_sitl.log 2>&1 &');
+        end
         system(ap_cmd);
         pause(5);
         
@@ -233,6 +255,10 @@ function AutoLandingMainFull(varargin)
             fprintf('[Pipeline] ArUco topic check: /aruco_markers available in ROS2\n');
         else
             fprintf('[Pipeline] WARNING: /aruco_markers not detected. Marker-vision loop is not active yet (bridge/detector launch needed).\n');
+        end
+
+        if enable_rviz_monitor
+            autlLaunchRvizMonitor(rootDir, rviz_ros_domain_id, num_workers);
         end
         fprintf('[Pipeline] ✓ Simulation environment ready\n');
         
@@ -254,6 +280,10 @@ function AutoLandingMainFull(varargin)
         mission_overrides.reset_model_name = 'iris_with_gimbal';
         mission_overrides.reset_ardupilot_each_scenario = true;
         mission_overrides.reset_mode_sequence = {'STABILIZE', 'GUIDED'};
+
+        if enable_multi_drone_profiles
+            mission_overrides.worker_profiles = worker_profiles;
+        end
         collection_result = AutoLandingDataParallel(num_workers, scenarios_per_worker, gazebo_server_mode, enable_visualization, mission_overrides);
         collection_dir = collection_result{1};  % Session directory
         num_collected = collection_result{2};   % Number of scenarios collected
@@ -449,8 +479,8 @@ function AutoLandingMainFull(varargin)
     end
 end
 
-function autlCreateArucoLandingWorld(base_world_path, output_world_path, aruco_pkg_dir, marker_center_xyz, marker_size_m, spawn_xy, spawn_yaw_deg, marker_id)
-% Generate a temporary world using ros2-gazebo-aruco marker model and fixed drone spawn.
+function autlCreateArucoLandingWorld(base_world_path, output_world_path, aruco_pkg_dir, marker_center_xyz, marker_size_m, spawn_xy, spawn_yaw_deg, marker_id, num_drones, worker_profiles)
+% Generate a temporary world using ros2-gazebo-aruco marker model and configurable multi-drone spawn.
 
 if ~isfile(base_world_path)
     error('Base world not found: %s', base_world_path);
@@ -459,12 +489,59 @@ if ~isfolder(fullfile(aruco_pkg_dir, 'gz-world', 'aruco_box'))
     error('ArUco model directory not found: %s', fullfile(aruco_pkg_dir, 'gz-world', 'aruco_box'));
 end
 
+if nargin < 9 || isempty(num_drones)
+    num_drones = 1;
+end
+if nargin < 10
+    worker_profiles = struct([]);
+end
+
 world_text = fileread(base_world_path);
-drone_pose = sprintf('%.3f %.3f 0.195 0 0 %.2f', spawn_xy(1), spawn_xy(2), spawn_yaw_deg);
-world_text = regexprep(world_text, ...
-    '<uri>model://iris_with_gimbal</uri>\s*<pose degrees="true">[^<]*</pose>', ...
-    sprintf('<uri>model://iris_with_gimbal</uri>\n      <pose degrees="true">%s</pose>', drone_pose), ...
-    'once');
+
+% Remove the default single-drone include; we will inject explicit includes for all drones.
+world_text = regexprep(world_text, '<include>\s*<uri>model://iris_with_gimbal</uri>[\s\S]*?</include>', '', 'once');
+
+drone_includes = '';
+for i = 1:num_drones
+    if ~isempty(worker_profiles) && numel(worker_profiles) >= i
+        p = worker_profiles(i);
+        if isfield(p, 'reset_spawn_xy') && numel(p.reset_spawn_xy) >= 2
+            spawn_i = double(p.reset_spawn_xy(1:2));
+        else
+            ang_i = deg2rad(spawn_yaw_deg + 18.0 * (i - 1));
+            spawn_i = [spawn_xy(1) + 0.35 * cos(ang_i), spawn_xy(2) + 0.35 * sin(ang_i)];
+        end
+        if isfield(p, 'reset_spawn_yaw_deg')
+            yaw_i = double(p.reset_spawn_yaw_deg);
+        else
+            yaw_i = spawn_yaw_deg;
+        end
+        if isfield(p, 'reset_model_name')
+            name_i = char(string(p.reset_model_name));
+        elseif i == 1
+            name_i = 'iris_with_gimbal';
+        else
+            name_i = sprintf('iris_with_gimbal_%d', i - 1);
+        end
+    else
+        ang_i = deg2rad(spawn_yaw_deg + 18.0 * (i - 1));
+        spawn_i = [spawn_xy(1) + 0.35 * cos(ang_i), spawn_xy(2) + 0.35 * sin(ang_i)];
+        yaw_i = spawn_yaw_deg;
+        if i == 1
+            name_i = 'iris_with_gimbal';
+        else
+            name_i = sprintf('iris_with_gimbal_%d', i - 1);
+        end
+    end
+
+    drone_pose_i = sprintf('%.3f %.3f 0.195 0 0 %.2f', spawn_i(1), spawn_i(2), yaw_i);
+    drone_includes = [drone_includes, sprintf([ ...
+        '    <include>\n' ...
+        '      <name>%s</name>\n' ...
+        '      <uri>model://iris_with_gimbal</uri>\n' ...
+        '      <pose degrees="true">%s</pose>\n' ...
+        '    </include>\n'], name_i, drone_pose_i)]; %#ok<AGROW>
+end
 
     % ros2-gazebo-aruco tutorial uses ~0.4 m marker; keep scale near 1 for texture fidelity.
     marker_width_ref_m = 0.4;
@@ -507,7 +584,7 @@ camera_model = sprintf([ ...
     '    </model>\n'], ...
     cam_x, cam_y, cam_z, cam_pitch, cam_yaw);
 
-world_text = strrep(world_text, '</world>', [aruco_model camera_model '  </world>']);
+world_text = strrep(world_text, '</world>', [drone_includes aruco_model camera_model '  </world>']);
 
 fid = fopen(output_world_path, 'w');
 if fid < 0
@@ -515,6 +592,89 @@ if fid < 0
 end
 fprintf(fid, '%s', world_text);
 fclose(fid);
+end
+
+function profiles = autlBuildWorkerProfiles(num_workers, base_spawn_xy, base_spawn_yaw_deg, base_takeoff_height_m, landing_pad_center, landing_pad_size)
+% Build worker-specific profiles so each worker can represent a distinct drone state.
+
+profiles = repmat(struct(), num_workers, 1);
+state_cycle = {'aggressive', 'conservative', 'orbit-heavy', 'balanced'};
+
+for i = 1:num_workers
+    phase = (i - 1) * (2*pi / max(1, num_workers));
+    spawn_offset = 0.35 * [cos(phase), sin(phase)];
+    spawn_xy_i = base_spawn_xy + spawn_offset;
+    yaw_i = base_spawn_yaw_deg + (i - 1) * 12.0;
+
+    profiles(i).worker_state_tag = sprintf('drone_%d_%s', i, state_cycle{mod(i-1, numel(state_cycle)) + 1});
+    profiles(i).mavlink_master = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (i - 1));
+    profiles(i).mavlink_master_fallback = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (i - 1));
+    if i == 1
+        profiles(i).reset_model_name = 'iris_with_gimbal';
+    else
+        profiles(i).reset_model_name = sprintf('iris_with_gimbal_%d', i - 1);
+    end
+    profiles(i).reset_spawn_xy = spawn_xy_i;
+    profiles(i).reset_spawn_yaw_deg = yaw_i;
+    profiles(i).takeoff_height_m = base_takeoff_height_m + 0.3 * (i - 1);
+    profiles(i).landing_pad_center = landing_pad_center;
+    profiles(i).landing_pad_size = landing_pad_size;
+
+    state_name = state_cycle{mod(i-1, numel(state_cycle)) + 1};
+    profiles(i).motion_profile = state_name;
+    switch state_name
+        case 'aggressive'
+            profiles(i).motion_gain_xy = 0.55;
+            profiles(i).motion_gain_orbit = 0.70;
+            profiles(i).motion_min_move_ms = 0.85;
+            profiles(i).motion_vxy_limit_ms = 1.8;
+            profiles(i).motion_vz_limit_ms = 0.8;
+        case 'conservative'
+            profiles(i).motion_gain_xy = 0.22;
+            profiles(i).motion_gain_orbit = 0.24;
+            profiles(i).motion_min_move_ms = 0.25;
+            profiles(i).motion_vxy_limit_ms = 0.8;
+            profiles(i).motion_vz_limit_ms = 0.4;
+        case 'orbit-heavy'
+            profiles(i).motion_gain_xy = 0.28;
+            profiles(i).motion_gain_orbit = 0.90;
+            profiles(i).motion_min_move_ms = 0.60;
+            profiles(i).motion_vxy_limit_ms = 1.4;
+            profiles(i).motion_vz_limit_ms = 0.5;
+        otherwise
+            profiles(i).motion_gain_xy = 0.32;
+            profiles(i).motion_gain_orbit = 0.42;
+            profiles(i).motion_min_move_ms = 0.55;
+            profiles(i).motion_vxy_limit_ms = 1.2;
+            profiles(i).motion_vz_limit_ms = 0.6;
+    end
+end
+end
+
+function autlLaunchRvizMonitor(rootDir, ros_domain_id, num_workers)
+% Launch RViz monitor in background with robust local environment loading.
+
+launch_script = fullfile(rootDir, 'scripts', 'launch_rviz_monitor.sh');
+if ~isfile(launch_script)
+    fprintf('[Pipeline] WARNING: RViz launcher not found: %s\n', launch_script);
+    return;
+end
+
+if nargin < 2 || strlength(string(ros_domain_id)) == 0
+    ros_domain_id = 'auto';
+end
+if nargin < 3 || isempty(num_workers)
+    num_workers = 1;
+end
+
+cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
+    launch_script, char(string(ros_domain_id)), num_workers);
+[rc, ~] = system(cmd);
+if rc == 0
+    fprintf('[Pipeline] RViz monitor launch requested (log: /tmp/autolanding_rviz.log)\n');
+else
+    fprintf('[Pipeline] WARNING: Failed to launch RViz monitor (rc=%d)\n', rc);
+end
 end
 
 function autlMainCleanup()

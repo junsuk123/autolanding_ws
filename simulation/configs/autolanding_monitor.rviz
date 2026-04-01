@@ -1,0 +1,269 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Time
+    Name: Time
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.03
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 50
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 15
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Camera
+      Normalize Range: true
+      Queue Size: 3
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /camera
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: ArUco MarkerArray
+      Namespaces:
+        "": true
+      Queue Size: 10
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aruco_markers
+      Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/PoseArray
+      Color: 255; 85; 0
+      Enabled: true
+      Length: 0.3
+      Name: ArUco Poses
+      Queue Size: 10
+      Radius: 0.03
+      Shaft Length: 0.25
+      Shaft Radius: 0.01
+      Shape: Arrow
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aruco_poses
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone Odom (/odom)
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.2
+        Axes Radius: 0.02
+        Color: 85; 255; 127
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone Odom (/mavros/local_position/odom)
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.2
+        Axes Radius: 0.02
+        Color: 51; 153; 255
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /mavros/local_position/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone1 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 255; 99; 71
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone1/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone2 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 65; 105; 225
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone2/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone3 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 50; 205; 50
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone3/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone4 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 255; 215; 0
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone4/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone5 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 186; 85; 211
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone5/odom
+      Value: true
+    - Angle Tolerance: 0.1
+      Class: rviz_default_plugins/Odometry
+      Enabled: true
+      Keep: 100
+      Name: Drone6 Odom
+      Position Tolerance: 0.1
+      Shape:
+        Alpha: 1
+        Axes Length: 0.25
+        Axes Radius: 0.02
+        Color: 255; 140; 0
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /drone6/odom
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 30; 30; 30
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 8
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Orbit
+      Pitch: 0.8
+      Target Frame: map
+      Yaw: 0.9
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 900
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd0000000400000000000002f30000033cfc0200000008fb000000100044006900730070006c00610079007301000000000000016e0000010b00fffffffb0000001200530065006c0065006300740069006f006e0000000174000000aa000000a400fffffffb0000001e0054006f006f006c002000500072006f0070006500720074006900650073010000022400000118000000d100fffffffb0000000a005600690065007700730100000342000000e9000000b400fffffffb0000000a00540069006d0065010000043300000109000002d000ffffff000000010000010f0000033cfc0200000001fb0000001a00520065006e0064006500720069006e006700000000000000033c0000007800ffffff00000003000006e00000004dfc0100000002fb0000000800540069006d00650100000000000006e0000002a100fffffffb0000000a0056006900650077007301000000000000050b000002d000ffffff00000000000004ef00000004fc0100000001fb0000000a005600690065007700730000000000000004ef000002d000ffffff000005760000033c00000004000000040000000800000008fc00000000
+  Width: 1600
+  X: 80
+  Y: 60

@@ -99,6 +99,27 @@ end
 if ~isfield(mission_config, 'mavlink_master_fallback')
     mission_config.mavlink_master_fallback = 'tcp:127.0.0.1:5760';
 end
+if ~isfield(mission_config, 'motion_profile')
+    mission_config.motion_profile = 'balanced';
+end
+if ~isfield(mission_config, 'motion_gain_xy')
+    mission_config.motion_gain_xy = 0.32;
+end
+if ~isfield(mission_config, 'motion_gain_orbit')
+    mission_config.motion_gain_orbit = 0.42;
+end
+if ~isfield(mission_config, 'motion_min_move_ms')
+    mission_config.motion_min_move_ms = 0.55;
+end
+if ~isfield(mission_config, 'motion_alt_gain')
+    mission_config.motion_alt_gain = 0.40;
+end
+if ~isfield(mission_config, 'motion_vxy_limit_ms')
+    mission_config.motion_vxy_limit_ms = 1.2;
+end
+if ~isfield(mission_config, 'motion_vz_limit_ms')
+    mission_config.motion_vz_limit_ms = 0.6;
+end
 
 log_prefix = char(string(mission_config.log_prefix));
 
@@ -157,6 +178,8 @@ end
 fprintf('%s[AutoLandingDataCollection] Landing Pad Center: [%.2f, %.2f, %.2f], Size: [%.2f x %.2f] m\n', ...
     log_prefix, mission_config.landing_pad_center(1), mission_config.landing_pad_center(2), mission_config.landing_pad_center(3), ...
     mission_config.landing_pad_size(1), mission_config.landing_pad_size(2));
+fprintf('%s[AutoLandingDataCollection] Motion Profile: %s (k_xy=%.2f, k_orbit=%.2f, min_move=%.2f)\n', ...
+    log_prefix, char(string(mission_config.motion_profile)), mission_config.motion_gain_xy, mission_config.motion_gain_orbit, mission_config.motion_min_move_ms);
 
 % Setup real-time visualization if enabled
 fig_handle = [];
@@ -1001,24 +1024,38 @@ dx = pad_center(1) - double(position_xyz(1));
 dy = pad_center(2) - double(position_xyz(2));
 dist_xy = hypot(dx, dy);
 
-kp_xy = 0.32;
-k_orbit = 0.42;
+profile_name = lower(char(string(mission_config.motion_profile)));
+kp_xy = double(mission_config.motion_gain_xy);
+k_orbit = double(mission_config.motion_gain_orbit);
+
+if strcmp(profile_name, 'aggressive')
+    kp_xy = max(kp_xy, 0.50);
+    k_orbit = max(k_orbit, 0.60);
+elseif strcmp(profile_name, 'conservative')
+    kp_xy = min(kp_xy, 0.24);
+    k_orbit = min(k_orbit, 0.28);
+elseif strcmp(profile_name, 'orbit-heavy')
+    k_orbit = max(k_orbit, 0.75);
+end
+
 vx = kp_xy * dx - k_orbit * dy;
 vy = kp_xy * dy + k_orbit * dx;
 
 % Force visible lateral movement even near the pad center.
 if dist_xy < 0.35
-    vx = 0.55;
+    vx = double(mission_config.motion_min_move_ms);
     vy = 0.00;
 end
 
 target_alt_ned = -abs(double(mission_config.takeoff_height_m));
-kz = 0.40;
+kz = double(mission_config.motion_alt_gain);
 vz = kz * (target_alt_ned - double(position_xyz(3)));
 
-vx = autlClamp(vx, -1.2, 1.2);
-vy = autlClamp(vy, -1.2, 1.2);
-vz = autlClamp(vz, -0.6, 0.6);
+vxy_lim = max(0.2, double(mission_config.motion_vxy_limit_ms));
+vz_lim = max(0.1, double(mission_config.motion_vz_limit_ms));
+vx = autlClamp(vx, -vxy_lim, vxy_lim);
+vy = autlClamp(vy, -vxy_lim, vxy_lim);
+vz = autlClamp(vz, -vz_lim, vz_lim);
 vel_cmd = [vx, vy, vz];
 end
 

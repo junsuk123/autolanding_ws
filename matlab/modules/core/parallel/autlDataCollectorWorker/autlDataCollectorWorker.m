@@ -116,9 +116,19 @@ try
         if ~isfield(mission_cfg, 'reset_ardupilot_each_scenario')
             mission_cfg.reset_ardupilot_each_scenario = config.reset_ardupilot_each_scenario;
         end
+        if ~isfield(mission_cfg, 'mavlink_master')
+            mission_cfg.mavlink_master = 'tcp:127.0.0.1:5762';
+        end
         if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1
-            mission_cfg.enable_auto_motion = false;
-            fprintf(log_fid, '[Worker %d] Auto motion disabled to avoid multi-worker MAVLink command conflicts.\n', worker_id);
+            if strcmp(char(string(mission_cfg.mavlink_master)), 'tcp:127.0.0.1:5762')
+                mission_cfg.enable_auto_motion = false;
+                fprintf(log_fid, '[Worker %d] Auto motion disabled: shared MAVLink master (%s).\n', worker_id, char(string(mission_cfg.mavlink_master)));
+            else
+                fprintf(log_fid, '[Worker %d] Auto motion enabled with dedicated MAVLink master (%s).\n', worker_id, char(string(mission_cfg.mavlink_master)));
+            end
+        end
+        if isfield(mission_cfg, 'worker_state_tag')
+            fprintf(log_fid, '[Worker %d] Worker state profile: %s\n', worker_id, char(string(mission_cfg.worker_state_tag)));
         end
 
         if mission_cfg.reset_pose_each_scenario
@@ -314,6 +324,8 @@ svc_name = strtrim(svc_out);
 name_candidates = {char(string(mission_cfg.reset_model_name)), 'iris', 'iris_with_gimbal_0'};
 name_candidates = unique(name_candidates, 'stable');
 
+applied_entities = strings(0, 1);
+last_err = "";
 for i = 1:numel(name_candidates)
     entity_name = name_candidates{i};
     req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
@@ -326,13 +338,22 @@ for i = 1:numel(name_candidates)
     out_l = lower(string(out));
     if rc == 0 && (~contains(out_l, 'false'))
         ok = true;
-        msg = sprintf('service=%s entity=%s spawn=[%.2f, %.2f, %.2f] yaw=%.1fdeg', ...
-            svc_name, entity_name, spawn_x, spawn_y, mission_cfg.reset_spawn_z_m, mission_cfg.reset_spawn_yaw_deg);
-        return;
+        applied_entities(end+1) = string(entity_name); %#ok<AGROW>
+    else
+        last_err = string(strtrim(out));
     end
 end
 
-msg = sprintf('set_pose failed for candidates on %s', svc_name);
+if ok
+    msg = sprintf('service=%s entity=[%s] spawn=[%.2f, %.2f, %.2f] yaw=%.1fdeg', ...
+        svc_name, strjoin(applied_entities, ', '), spawn_x, spawn_y, mission_cfg.reset_spawn_z_m, mission_cfg.reset_spawn_yaw_deg);
+else
+    if strlength(last_err) == 0
+        msg = sprintf('set_pose failed for candidates on %s', svc_name);
+    else
+        msg = sprintf('set_pose failed for candidates on %s (%s)', svc_name, char(last_err));
+    end
+end
 end
 
 function [ok, msg] = autlResetArduPilotState(mission_cfg)

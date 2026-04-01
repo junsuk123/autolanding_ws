@@ -82,6 +82,7 @@ worker_config.worker_log_dir = fullfile(log_base, session_id);
 worker_config.gazebo_server_mode = gazebo_server_mode;  % Server or GUI
 worker_config.enable_visualization = enable_visualization;  % Real-time monitoring
 worker_config.mission_overrides = mission_overrides;
+worker_config.num_workers = num_workers;
 
 % Create shared worker log root once to avoid mkdir race warnings in workers
 if ~exist(worker_config.worker_log_dir, 'dir')
@@ -102,7 +103,8 @@ if num_workers == 1 || verLessThan('matlab', '9.9')
     for worker_id = 1:num_workers
         try
             fprintf('[AutoLandingDataParallel] Launching worker %d/%d\n', worker_id, num_workers);
-            autlDataCollectorWorker(worker_id, worker_config);
+            worker_cfg_i = autlBuildWorkerConfig(worker_config, worker_id);
+            autlDataCollectorWorker(worker_id, worker_cfg_i);
             fprintf('[AutoLandingDataParallel] Worker %d completed.\n\n', worker_id);
         catch ME
             if autlParallelIsUserInterrupt(ME)
@@ -135,12 +137,16 @@ else
     
     % Launch workers via parfor
     results = cellArray(num_workers);
+    worker_cfg_all = cellArray(num_workers);
+    for worker_id = 1:num_workers
+        worker_cfg_all{worker_id} = autlBuildWorkerConfig(worker_config, worker_id);
+    end
     worker_ids = 1:num_workers;
     
     parfor worker_id = worker_ids
         try
             % Each worker runs independently
-            autlDataCollectorWorker(worker_id, worker_config);
+            autlDataCollectorWorker(worker_id, worker_cfg_all{worker_id});
             results{worker_id} = 'success';
         catch ME
             results{worker_id} = sprintf('error: %s', ME.message);
@@ -285,4 +291,38 @@ catch
 end
 
 fprintf('[AutoLandingDataParallel.cleanup] Cleanup complete.\n');
+end
+
+function worker_cfg = autlBuildWorkerConfig(base_cfg, worker_id)
+% Create per-worker config so each worker can collect from distinct vehicle states.
+
+worker_cfg = base_cfg;
+
+if ~isfield(worker_cfg, 'mission_overrides') || ~isstruct(worker_cfg.mission_overrides)
+    worker_cfg.mission_overrides = struct();
+end
+
+overrides = worker_cfg.mission_overrides;
+if isfield(overrides, 'worker_profiles') && ~isempty(overrides.worker_profiles)
+    profiles = overrides.worker_profiles;
+    if isstruct(profiles)
+        if numel(profiles) >= worker_id
+            p = profiles(worker_id);
+        else
+            p = profiles(end);
+        end
+
+        p_fields = fieldnames(p);
+        for fi = 1:numel(p_fields)
+            f = p_fields{fi};
+            overrides.(f) = p.(f);
+        end
+    end
+end
+
+if ~isfield(overrides, 'worker_state_tag') || strlength(string(overrides.worker_state_tag)) == 0
+    overrides.worker_state_tag = sprintf('worker_%d', worker_id);
+end
+
+worker_cfg.mission_overrides = overrides;
 end
