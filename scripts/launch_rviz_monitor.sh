@@ -78,6 +78,13 @@ if [[ "$START_BRIDGE" -eq 1 ]]; then
     /camera@sensor_msgs/msg/Image@gz.msgs.Image \
     /camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo \
     > /tmp/autolanding_ros_gz_bridge.log 2>&1 &
+
+  for ((i=1; i<=WORKER_COUNT; i++)); do
+    echo "[INFO] starting camera bridge for /drone${i}/camera"
+    nohup ros2 run ros_gz_bridge parameter_bridge \
+      "/drone${i}/camera@sensor_msgs/msg/Image@gz.msgs.Image" \
+      > "/tmp/autolanding_ros_gz_bridge_drone${i}.log" 2>&1 &
+  done
 fi
 
 if [[ "$START_ARUCO" -eq 1 ]]; then

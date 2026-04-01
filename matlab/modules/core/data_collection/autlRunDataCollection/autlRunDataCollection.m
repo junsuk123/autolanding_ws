@@ -51,6 +51,9 @@ end
 if ~isfield(mission_config, 'enable_auto_motion')
     mission_config.enable_auto_motion = true;
 end
+if ~isfield(mission_config, 'require_mavlink_for_auto_motion')
+    mission_config.require_mavlink_for_auto_motion = true;
+end
 if ~isfield(mission_config, 'takeoff_height_m')
     mission_config.takeoff_height_m = 3.0;
 end
@@ -237,6 +240,17 @@ try
 
     % Arm/takeoff once so vehicle actually moves during collection.
     control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
+    if mission_config.enable_auto_motion
+        if mission_config.require_mavlink_for_auto_motion
+            precheck_res = autlMavproxyControl('status', struct(), control_cfg);
+            if ~precheck_res.is_success
+                mission_config.enable_auto_motion = false;
+                fprintf('%s[AutoLandingDataCollection] Warning: MAVLink precheck failed, auto motion disabled for this run: %s\n', ...
+                    log_prefix, precheck_res.error_message);
+            end
+        end
+    end
+
     if mission_config.enable_auto_motion
         fprintf('%s[AutoLandingDataCollection] Auto motion control: ENABLED\n', log_prefix);
         fprintf('%s[AutoLandingDataCollection] Auto motion: setting GUIDED mode...\n', log_prefix);

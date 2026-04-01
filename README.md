@@ -908,6 +908,10 @@ Notes:
 - Worker MAVLink mapping follows ArduPilot instance offsets: worker `i` uses `tcp:127.0.0.1:(5762 + 10*(i-1))` with fallback `5760 + 10*(i-1)`.
 - RViz monitor launches a MAVLink-to-ROS odometry publisher and exposes namespaced topics: `/drone1/odom`, `/drone2/odom`, ...
 - World generation is now multi-drone aware: generated world includes one iris model per worker using profile-based spawn/yaw/model-name values.
+- RViz preset includes per-drone color odometry, path trails (`/droneN/path`), and per-drone camera image displays (`/droneN/camera`).
+- Bridge launcher now starts per-worker camera bridges automatically for `/droneN/camera` topics.
+- Drone spawns are placed on a fixed-spacing grid (`3.0 m`) to prevent overlap during multi-worker runs.
+- ArUco markers are spawned per drone near each spawn point (worker-specific landing pad center), and observer cameras are positioned to face each marker to reduce cross-camera overlap.
 
 ## 8. Next integration targets
 

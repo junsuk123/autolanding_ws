@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import math
-import time
 from dataclasses import dataclass
+from collections import deque
 
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 
@@ -37,11 +39,15 @@ class MultiDroneOdomPublisher(Node):
         self.states = {}
         self.links = {}
         self.odom_pubs = {}
+        self.path_pubs = {}
+        self.paths = {}
         self.tf_broadcaster = TransformBroadcaster(self)
 
         for i in range(1, self.workers + 1):
             self.states[i] = DroneState()
             self.odom_pubs[i] = self.create_publisher(Odometry, f"/drone{i}/odom", 10)
+            self.path_pubs[i] = self.create_publisher(Path, f"/drone{i}/path", 10)
+            self.paths[i] = deque(maxlen=400)
             self.links[i] = self._connect_mav(i)
 
         self.timer = self.create_timer(0.05, self._tick)
@@ -130,6 +136,24 @@ class MultiDroneOdomPublisher(Node):
         odom.twist.twist.linear.y = st.vy
         odom.twist.twist.linear.z = st.vz
         self.odom_pubs[idx].publish(odom)
+
+        pose = PoseStamped()
+        pose.header.stamp = now
+        pose.header.frame_id = "map"
+        pose.pose.position.x = st.x
+        pose.pose.position.y = st.y
+        pose.pose.position.z = st.z
+        pose.pose.orientation.x = qx
+        pose.pose.orientation.y = qy
+        pose.pose.orientation.z = qz
+        pose.pose.orientation.w = qw
+        self.paths[idx].append(pose)
+
+        path_msg = Path()
+        path_msg.header.stamp = now
+        path_msg.header.frame_id = "map"
+        path_msg.poses = list(self.paths[idx])
+        self.path_pubs[idx].publish(path_msg)
 
         tf_msg = TransformStamped()
         tf_msg.header.stamp = now
