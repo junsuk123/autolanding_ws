@@ -1,3 +1,24 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+*.log
+*.tmp
+*.tlog
+*.tlog.raw
+eeprom.bin
+dumpcore.sh_*.out
+dumpstack.sh_*.out
+data/collected/
+data/logs/
+matlab/logs/
+*.BIN
+LASTLOG.TXT
+data/raw/*
+data/processed/*
+!data/processed/.gitkeep
+
 devel/
 logs/
 build/
@@ -34,7 +55,6 @@ CMakeLists.txt.user
 
 srv/_*.py
 *.pcd
-*.pyc
 qtcreator-*
 *.user
 

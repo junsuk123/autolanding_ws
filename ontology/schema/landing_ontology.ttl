@@ -1,0 +1,24 @@
+@prefix ex: <http://example.org/autolanding#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+
+ex:AutolandingOntology a owl:Ontology .
+
+ex:Object a owl:Class .
+ex:Attribute a owl:Class .
+ex:Relation a owl:Class .
+
+ex:Drone a owl:Class ; rdfs:subClassOf ex:Object .
+ex:LandingPad a owl:Class ; rdfs:subClassOf ex:Object .
+ex:WindField a owl:Class ; rdfs:subClassOf ex:Object .
+ex:VisualMarker a owl:Class ; rdfs:subClassOf ex:Object .
+
+ex:hasAttribute a owl:ObjectProperty .
+ex:hasRelation a owl:ObjectProperty .
+ex:hasRiskScore a owl:DatatypeProperty .
+
+ex:near a ex:Relation .
+ex:alignedWith a ex:Relation .
+ex:affectedBy a ex:Relation .
+ex:visibleTo a ex:Relation .

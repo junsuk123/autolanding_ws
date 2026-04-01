@@ -1,0 +1,288 @@
+function result = AutoLandingDataParallel(num_workers, scenarios_per_worker, gazebo_server_mode, enable_visualization, mission_overrides)
+% AutoLandingDataParallel
+% Parallel data collection orchestration (inspired by IICC26 AutoSimMain).
+% Spawns multiple workers collecting raw sensor data independently.
+%
+% Usage:
+%   AutoLandingDataParallel()              % 4 workers, 10 scenarios each
+%   AutoLandingDataParallel(2, 50)         % 2 workers, 50 scenarios each
+
+if nargin < 1 || isempty(num_workers)
+    num_workers = 4;
+end
+if nargin < 2 || isempty(scenarios_per_worker)
+    scenarios_per_worker = 10;
+end
+if nargin < 3 || isempty(gazebo_server_mode)
+    gazebo_server_mode = true;  % Default: server mode (headless)
+end
+if nargin < 4 || isempty(enable_visualization)
+    enable_visualization = true;  % Default: enable real-time visualization
+end
+if nargin < 5 || isempty(mission_overrides)
+    mission_overrides = struct();
+end
+
+% Validate inputs
+num_workers = max(1, round(num_workers));
+scenarios_per_worker = max(1, round(scenarios_per_worker));
+
+rootDir = fileparts(fileparts(mfilename('fullpath')));
+
+% Setup paths
+modDir = fullfile(rootDir, 'matlab', 'modules');
+if exist(modDir, 'dir')
+    addpath(modDir);
+end
+coreDir = fullfile(modDir, 'core');
+if exist(coreDir, 'dir')
+    addpath(genpath(coreDir));
+end
+
+fprintf('\n');
+fprintf('═══════════════════════════════════════════════════════\n');
+fprintf('  AutoLanding Parallel Data Collection\n');
+fprintf('  Workers: %d\n', num_workers);
+fprintf('  Scenarios per Worker: %d\n', scenarios_per_worker);
+fprintf('  Total Scenarios: %d\n', num_workers * scenarios_per_worker);
+fprintf('═══════════════════════════════════════════════════════\n');
+
+% Create output directories
+output_base = fullfile(rootDir, 'data', 'collected', 'parallel');
+log_base = fullfile(rootDir, 'data', 'logs', 'parallel');
+
+if ~exist(output_base, 'dir')
+    mkdir(output_base);
+end
+if ~exist(log_base, 'dir')
+    mkdir(log_base);
+end
+
+% Session ID
+session_id = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+session_dir = fullfile(output_base, session_id);
+if ~exist(session_dir, 'dir')
+    mkdir(session_dir);
+end
+session_start_time = datetime('now');
+
+fprintf('\n[AutoLandingDataParallel] Session ID: %s\n', session_id);
+fprintf('[AutoLandingDataParallel] Output: %s\n\n', session_dir);
+
+% Register cleanup function for graceful shutdown (Ctrl+C)
+cleanup_obj = onCleanup(@() autlParallelCleanup(session_dir, num_workers));
+
+% Build worker configuration
+worker_config = struct();
+worker_config.scenarios_per_worker = scenarios_per_worker;
+worker_config.sample_rate = 50;  % Hz
+worker_config.scenario_duration = 120;  % seconds
+worker_config.output_dir = session_dir;
+worker_config.worker_log_dir = fullfile(log_base, session_id);
+worker_config.gazebo_server_mode = gazebo_server_mode;  % Server or GUI
+worker_config.enable_visualization = enable_visualization;  % Real-time monitoring
+worker_config.mission_overrides = mission_overrides;
+
+% Create shared worker log root once to avoid mkdir race warnings in workers
+if ~exist(worker_config.worker_log_dir, 'dir')
+    mkdir(worker_config.worker_log_dir);
+end
+
+% Create tasks array for parallel.pool.DataQueue
+if num_workers == 1 || verLessThan('matlab', '9.9')
+    % Use sequential execution for single-worker mode (and older MATLAB).
+    % This avoids unnecessary parfor orchestration/interruption overhead.
+    if num_workers == 1
+        fprintf('[AutoLandingDataParallel] Single-worker mode detected. Running sequentially (no parfor).\n\n');
+    else
+        fprintf('[AutoLandingDataParallel] MATLAB version < 9.9 detected. Running sequential workers.\n\n');
+    end
+    
+    worker_failed = false;
+    for worker_id = 1:num_workers
+        try
+            fprintf('[AutoLandingDataParallel] Launching worker %d/%d\n', worker_id, num_workers);
+            autlDataCollectorWorker(worker_id, worker_config);
+            fprintf('[AutoLandingDataParallel] Worker %d completed.\n\n', worker_id);
+        catch ME
+            if autlParallelIsUserInterrupt(ME)
+                rethrow(ME);
+            end
+            fprintf('[AutoLandingDataParallel] Worker %d FAILED: %s\n', worker_id, ME.message);
+            worker_failed = true;
+        end
+    end
+    if worker_failed
+        error('AutoLanding:ParallelCollectionFailed', '[AutoLandingDataParallel] One or more workers failed during sequential collection.');
+    end
+else
+    % Use parallel pool with DataQueue (MATLAB 9.9+)
+    fprintf('[AutoLandingDataParallel] Creating parallel pool (%d workers)...\n\n', num_workers);
+    
+    try
+        pool = parpool(num_workers, 'IdleTimeout', 240);
+    catch ME
+        % Pool might already exist
+        pool = gcp('nocreate');
+        if isempty(pool)
+            error('Failed to create parallel pool: %s', ME.message);
+        end
+        if pool.NumWorkers < num_workers
+            delete(pool);
+            pool = parpool(num_workers, 'IdleTimeout', 240);
+        end
+    end
+    
+    % Launch workers via parfor
+    results = cellArray(num_workers);
+    worker_ids = 1:num_workers;
+    
+    parfor worker_id = worker_ids
+        try
+            % Each worker runs independently
+            autlDataCollectorWorker(worker_id, worker_config);
+            results{worker_id} = 'success';
+        catch ME
+            results{worker_id} = sprintf('error: %s', ME.message);
+        end
+    end
+    
+    % Summarize results
+    fprintf('\n[AutoLandingDataParallel] Parallel execution results:\n');
+    success_count = 0;
+    for i = 1:num_workers
+        if strcmp(results{i}, 'success')
+            fprintf('  Worker %d: SUCCESS\n', i);
+            success_count = success_count + 1;
+        else
+            fprintf('  Worker %d: %s\n', i, results{i});
+        end
+    end
+    
+    fprintf('\n[AutoLandingDataParallel] %d/%d workers completed successfully.\n', success_count, num_workers);
+    if success_count < num_workers
+        error('AutoLanding:ParallelCollectionFailed', '[AutoLandingDataParallel] %d/%d workers failed.', num_workers - success_count, num_workers);
+    end
+end
+
+function tf = autlParallelIsUserInterrupt(ME)
+% True when exception corresponds to Ctrl+C/user cancellation.
+
+tf = false;
+if nargin < 1 || isempty(ME)
+    return;
+end
+
+id = lower(string(ME.identifier));
+msg = lower(string(ME.message));
+tf = contains(id, "operationterminatedbyuser") || ...
+     contains(id, "interrupted") || ...
+     contains(id, "autolanding:userinterrupted") || ...
+     contains(msg, "operation terminated by user") || ...
+     contains(msg, "terminated by user") || ...
+     contains(msg, "interrupted") || ...
+     contains(msg, "ctrl+c");
+
+if tf
+    return;
+end
+
+try
+    causes = ME.cause;
+    for i = 1:numel(causes)
+        if autlParallelIsUserInterrupt(causes{i})
+            tf = true;
+            return;
+        end
+    end
+catch
+end
+end
+
+% Monitor progress
+fprintf('\n[AutoLandingDataParallel] Session directory structure:\n');
+fprintf('  %s\n', session_dir);
+workerDirs = dir(fullfile(session_dir, 'worker_*'));
+for i = 1:numel(workerDirs)
+    if workerDirs(i).isdir
+        scenarioDirs = dir(fullfile(session_dir, workerDirs(i).name, 'scenario_*'));
+        fprintf('    %s/ (%d scenarios)\n', workerDirs(i).name, numel(scenarioDirs));
+    end
+end
+
+% Merge metadata
+fprintf('\n[AutoLandingDataParallel] Creating session metadata...\n');
+session_meta = struct();
+session_meta.session_id = session_id;
+session_meta.num_workers = num_workers;
+session_meta.scenarios_per_worker = scenarios_per_worker;
+session_meta.total_scenarios = num_workers * scenarios_per_worker;
+session_meta.start_time = session_start_time;
+session_meta.collection_type = 'raw_parallel';
+session_meta.ontology_applied = false;
+
+meta_path = fullfile(session_dir, 'session_metadata.json');
+autlSaveJson(meta_path, session_meta);
+
+fprintf('[AutoLandingDataParallel] Session metadata: %s\n', meta_path);
+fprintf('\n[AutoLandingDataParallel] Parallel data collection COMPLETE.\n');
+fprintf('  Next steps: Process collected raw data offline with ontology/AI fusion pipeline.\n\n');
+
+% Return session directory and actually collected raw-data scenario count.
+actual_raw_files = dir(fullfile(session_dir, 'worker_*', 'scenario_*', 'raw_data.mat'));
+actual_collected = numel(actual_raw_files);
+if actual_collected == 0
+    error('AutoLanding:NoRawData', '[AutoLandingDataParallel] No raw_data.mat files were produced in %s', session_dir);
+end
+result = {session_dir, actual_collected};
+
+end
+
+function cellArr = cellArray(n)
+% Helper for MATLAB compatibility
+cellArr = cell(n, 1);
+end
+
+function autlParallelCleanup(session_dir, num_workers)
+% Cleanup function for graceful shutdown
+% Called automatically when AutoLandingDataParallel ends (including on Ctrl+C)
+
+fprintf('\n[AutoLandingDataParallel.cleanup] Performing cleanup...\n');
+
+% Kill all Gazebo sim and SITL processes to prevent port conflicts
+fprintf('[AutoLandingDataParallel.cleanup] Killing gazebo and ArduPilot processes...\n');
+try
+    system('pkill -f "gz sim" 2>/dev/null');
+    system('pkill -f "arducopter" 2>/dev/null');
+    system('pkill -f "mavproxy.py" 2>/dev/null');
+    pause(0.5);
+    fprintf('[AutoLandingDataParallel.cleanup] Processes terminated.\n');
+catch
+    % Silent fail
+end
+
+% Kill parallel pool if it exists
+try
+    pool = gcp('nocreate');
+    if ~isempty(pool)
+        fprintf('[AutoLandingDataParallel.cleanup] Deleting parallel pool...\n');
+        delete(pool);
+    end
+catch
+    % Silent fail
+end
+
+% Ensure session directory is readable (check latest data)
+try
+    if isdir(session_dir)
+        fprintf('[AutoLandingDataParallel.cleanup] Session data saved in: %s\n', session_dir);
+        % Count completed scenarios
+        all_scenarios = dir(fullfile(session_dir, 'worker_*', 'scenario_*'));
+        fprintf('[AutoLandingDataParallel.cleanup] Recovered %d scenario directories\n', numel(all_scenarios));
+    end
+catch
+    % Silent fail
+end
+
+fprintf('[AutoLandingDataParallel.cleanup] Cleanup complete.\n');
+end

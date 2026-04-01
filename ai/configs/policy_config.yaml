@@ -1,0 +1,15 @@
+policy:
+  horizon_s: 8.0
+  dt: 0.1
+  max_xy_speed: 0.8
+  max_z_descent_speed: 0.7
+  min_z_descent_speed: 0.15
+
+fusion:
+  semantic_weight: 0.45
+  ai_weight: 0.55
+
+risk:
+  wind_high_threshold: 0.7
+  vision_low_threshold: 0.4
+  unstable_state_threshold: 0.6

@@ -1,0 +1,14 @@
+{
+  "objects": [
+    {"id": "drone_1", "type": "Drone", "attributes": {"z": 6.5, "vx": 0.12, "vy": -0.08, "yaw_error": 0.04}},
+    {"id": "pad_1", "type": "LandingPad", "attributes": {"x": 0.0, "y": 0.0, "z": 0.0}},
+    {"id": "wind_1", "type": "WindField", "attributes": {"wind_speed": 4.2, "gust_risk": 0.35}},
+    {"id": "marker_1", "type": "VisualMarker", "attributes": {"tag_confidence": 0.86, "tag_error": 0.11}}
+  ],
+  "relations": [
+    {"subject": "drone_1", "predicate": "near", "object": "pad_1"},
+    {"subject": "drone_1", "predicate": "visibleTo", "object": "marker_1"},
+    {"subject": "drone_1", "predicate": "affectedBy", "object": "wind_1"},
+    {"subject": "drone_1", "predicate": "alignedWith", "object": "pad_1"}
+  ]
+}
