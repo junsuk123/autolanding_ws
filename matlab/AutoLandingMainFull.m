@@ -136,6 +136,7 @@ function AutoLandingMainFull(varargin)
         spawn_angle_rad = deg2rad(spawn_angle_deg);
         spawn_xy = [landing_pad_center(1) + spawn_radius_m * cos(spawn_angle_rad), ...
                     landing_pad_center(2) + spawn_radius_m * sin(spawn_angle_rad)];
+        spawn_yaw_deg = rad2deg(atan2(landing_pad_center(2) - spawn_xy(2), landing_pad_center(1) - spawn_xy(1)));
         if norm(spawn_xy - landing_pad_center(1:2)) > 1.0
             error('Spawn position exceeds 1 m radius from marker center.');
         end
@@ -144,7 +145,7 @@ function AutoLandingMainFull(varargin)
         if use_aruco_landing_pad
             generated_world_path = fullfile('/tmp', 'iris_runway_aruco_landing.sdf');
             autlCreateArucoLandingWorld(base_world_path, generated_world_path, aruco_pkg_dir, ...
-                landing_pad_center, marker_size_m, spawn_xy, aruco_marker_id);
+                landing_pad_center, marker_size_m, spawn_xy, spawn_yaw_deg, aruco_marker_id);
             world_path_to_launch = generated_world_path;
             fprintf('[Pipeline] ArUco world generated: %s\n', world_path_to_launch);
         end
@@ -219,6 +220,20 @@ function AutoLandingMainFull(varargin)
         % Extra wait time to ensure processes started
         fprintf('[Pipeline] Waiting for ArduPilot initialization...\n');
         pause(10);
+
+        [cam_topic_ok, ~] = system('bash -lc ''timeout 3 gz topic -l | grep -E "^/camera$" > /dev/null''');
+        if cam_topic_ok == 0
+            fprintf('[Pipeline] Camera topic check: /camera available in Gazebo transport\n');
+        else
+            fprintf('[Pipeline] WARNING: /camera not found in Gazebo transport topics\n');
+        end
+
+        [aruco_topic_ok, ~] = system('bash -lc ''timeout 3 ros2 topic list 2>/dev/null | grep -E "^/aruco_markers$" > /dev/null''');
+        if aruco_topic_ok == 0
+            fprintf('[Pipeline] ArUco topic check: /aruco_markers available in ROS2\n');
+        else
+            fprintf('[Pipeline] WARNING: /aruco_markers not detected. Marker-vision loop is not active yet (bridge/detector launch needed).\n');
+        end
         fprintf('[Pipeline] ✓ Simulation environment ready\n');
         
         %% STEP 1: Parallel Data Collection
@@ -230,10 +245,12 @@ function AutoLandingMainFull(varargin)
         mission_overrides.landing_pad_center = landing_pad_center;
         mission_overrides.landing_pad_size = landing_pad_size;
         mission_overrides.landing_pad_topic = landing_pad_topic;
+        mission_overrides.telemetry_query_interval_s = 1.0;
+        mission_overrides.control_interval_s = 1.0;
         mission_overrides.reset_pose_each_scenario = true;
         mission_overrides.reset_spawn_xy = spawn_xy;
         mission_overrides.reset_spawn_z_m = 0.195;
-        mission_overrides.reset_spawn_yaw_deg = 90.0;
+        mission_overrides.reset_spawn_yaw_deg = spawn_yaw_deg;
         mission_overrides.reset_model_name = 'iris_with_gimbal';
         mission_overrides.reset_ardupilot_each_scenario = true;
         mission_overrides.reset_mode_sequence = {'STABILIZE', 'GUIDED'};
@@ -432,7 +449,7 @@ function AutoLandingMainFull(varargin)
     end
 end
 
-function autlCreateArucoLandingWorld(base_world_path, output_world_path, aruco_pkg_dir, marker_center_xyz, marker_size_m, spawn_xy, marker_id)
+function autlCreateArucoLandingWorld(base_world_path, output_world_path, aruco_pkg_dir, marker_center_xyz, marker_size_m, spawn_xy, spawn_yaw_deg, marker_id)
 % Generate a temporary world using ros2-gazebo-aruco marker model and fixed drone spawn.
 
 if ~isfile(base_world_path)
@@ -443,7 +460,7 @@ if ~isfolder(fullfile(aruco_pkg_dir, 'gz-world', 'aruco_box'))
 end
 
 world_text = fileread(base_world_path);
-drone_pose = sprintf('%.3f %.3f 0.195 0 0 90', spawn_xy(1), spawn_xy(2));
+drone_pose = sprintf('%.3f %.3f 0.195 0 0 %.2f', spawn_xy(1), spawn_xy(2), spawn_yaw_deg);
 world_text = regexprep(world_text, ...
     '<uri>model://iris_with_gimbal</uri>\s*<pose degrees="true">[^<]*</pose>', ...
     sprintf('<uri>model://iris_with_gimbal</uri>\n      <pose degrees="true">%s</pose>', drone_pose), ...
@@ -465,10 +482,16 @@ aruco_model = sprintf([ ...
     marker_center_xyz(1), marker_center_xyz(2), aruco_pose_z, ...
     aruco_scale, aruco_scale, aruco_scale, marker_id);
 
+cam_x = marker_center_xyz(1) + 4.0;
+cam_y = marker_center_xyz(2);
+cam_z = marker_center_xyz(3) + 1.6;
+cam_yaw = pi;
+cam_pitch = -atan2(cam_z - marker_center_xyz(3), max(0.1, hypot(marker_center_xyz(1) - cam_x, marker_center_xyz(2) - cam_y)));
+
 camera_model = sprintf([ ...
     '\n    <model name="aruco_observer_camera">\n' ...
     '      <static>true</static>\n' ...
-    '      <pose>%.3f %.3f %.3f 0 0 %.3f</pose>\n' ...
+    '      <pose>%.3f %.3f %.3f 0 %.6f %.6f</pose>\n' ...
     '      <link name="link">\n' ...
     '        <sensor name="camera" type="camera">\n' ...
     '          <camera>\n' ...
@@ -482,7 +505,7 @@ camera_model = sprintf([ ...
     '        </sensor>\n' ...
     '      </link>\n' ...
     '    </model>\n'], ...
-    marker_center_xyz(1) + 4.0, marker_center_xyz(2), marker_center_xyz(3) + 1.6, pi);
+    cam_x, cam_y, cam_z, cam_pitch, cam_yaw);
 
 world_text = strrep(world_text, '</world>', [aruco_model camera_model '  </world>']);
 
