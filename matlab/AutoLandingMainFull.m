@@ -541,13 +541,16 @@ for i = 1:num_drones
         end
     end
 
+    fdm_port_in_i = 9002 + 10 * (i - 1);
+    model_uri_i = autlPrepareMultiDroneModelVariant(base_world_path, i, fdm_port_in_i);
+
     drone_pose_i = sprintf('%.3f %.3f 0.195 0 0 %.2f', spawn_i(1), spawn_i(2), yaw_i);
     drone_includes = [drone_includes, sprintf([ ...
         '    <include>\n' ...
         '      <name>%s</name>\n' ...
-        '      <uri>model://iris_with_gimbal</uri>\n' ...
+        '      <uri>%s</uri>\n' ...
         '      <pose degrees="true">%s</pose>\n' ...
-        '    </include>\n'], name_i, drone_pose_i)]; %#ok<AGROW>
+        '    </include>\n'], name_i, model_uri_i, drone_pose_i)]; %#ok<AGROW>
 
     % Place one marker near each drone (worker-specific landing pad when available).
     if ~isempty(worker_profiles) && numel(worker_profiles) >= i && ...
@@ -629,6 +632,53 @@ if fid < 0
 end
 fprintf(fid, '%s', world_text);
 fclose(fid);
+end
+
+function model_uri = autlPrepareMultiDroneModelVariant(base_world_path, drone_index, fdm_port_in)
+% Create per-drone iris model variant with isolated ArduPilotPlugin FDM input port.
+
+if drone_index <= 1
+    model_uri = 'model://iris_with_gimbal';
+else
+    model_uri = sprintf('model://iris_with_gimbal_w%d', drone_index);
+end
+
+gazebo_pkg_dir = fileparts(fileparts(base_world_path));
+template_model_dir = fullfile(gazebo_pkg_dir, 'models', 'iris_with_gimbal');
+template_sdf = fullfile(template_model_dir, 'model.sdf');
+template_cfg = fullfile(template_model_dir, 'model.config');
+
+if ~isfile(template_sdf)
+    error('Template iris model not found: %s', template_sdf);
+end
+
+variant_name = sprintf('iris_with_gimbal_w%d', drone_index);
+variant_dir = fullfile('/tmp', variant_name);
+if ~isfolder(variant_dir)
+    mkdir(variant_dir);
+end
+
+sdf_text = fileread(template_sdf);
+sdf_text = strrep(sdf_text, '<model name="iris_with_gimbal">', sprintf('<model name="%s">', variant_name));
+sdf_text = regexprep(sdf_text, '<fdm_port_in>\s*\d+\s*</fdm_port_in>', sprintf('<fdm_port_in>%d</fdm_port_in>', fdm_port_in), 'once');
+
+fid = fopen(fullfile(variant_dir, 'model.sdf'), 'w');
+if fid < 0
+    error('Failed to write model variant sdf: %s', fullfile(variant_dir, 'model.sdf'));
+end
+fprintf(fid, '%s', sdf_text);
+fclose(fid);
+
+if isfile(template_cfg)
+    cfg_text = fileread(template_cfg);
+    cfg_text = regexprep(cfg_text, '<name>\s*iris_with_gimbal\s*</name>', sprintf('<name>%s</name>', variant_name), 'once');
+    fid = fopen(fullfile(variant_dir, 'model.config'), 'w');
+    if fid < 0
+        error('Failed to write model variant config: %s', fullfile(variant_dir, 'model.config'));
+    end
+    fprintf(fid, '%s', cfg_text);
+    fclose(fid);
+end
 end
 
 function profiles = autlBuildWorkerProfiles(num_workers, base_spawn_xy, base_spawn_yaw_deg, base_takeoff_height_m, landing_pad_center, landing_pad_size)

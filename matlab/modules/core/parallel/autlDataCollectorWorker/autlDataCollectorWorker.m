@@ -378,6 +378,17 @@ end
 
 ctrl_cfg = struct('mav', struct('master_connection', master_conn));
 
+% Avoid churn: when master is unreachable, skip disarm/mode calls for this scenario.
+status_res = autlMavproxyControl('status', struct(), ctrl_cfg);
+if ~status_res.is_success
+    emsg = strtrim(string(status_res.error_message));
+    if strlength(emsg) == 0
+        emsg = "unknown";
+    end
+    msg = char("skip_reset:mavlink_unreachable(" + emsg + ")");
+    return;
+end
+
 disarm_res = autlMavproxyControl('disarm', struct(), ctrl_cfg);
 if disarm_res.is_success
     parts(end+1) = "disarm=ok"; %#ok<AGROW>

@@ -143,6 +143,18 @@ function result = autlMavproxyControl(action, params, cfg)
             end
 
             msg = strtrim(cmd_out);
+            if strlength(string(msg)) > 0
+                lines = regexp(char(msg), '\\r?\\n', 'split');
+                lines = lines(~cellfun('isempty', strtrim(lines)));
+                if ~isempty(lines)
+                    err_idx = find(startsWith(lines, 'ERR:'), 1, 'last');
+                    if ~isempty(err_idx)
+                        msg = strtrim(lines{err_idx});
+                    else
+                        msg = strtrim(lines{end});
+                    end
+                end
+            end
             if strlength(string(msg)) == 0
                 msg = sprintf('pymavlink command failed (rc=%d)', rc);
             end
