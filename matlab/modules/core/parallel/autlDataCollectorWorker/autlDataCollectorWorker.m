@@ -137,8 +137,8 @@ try
                 worker_id, scenario_num, samples, duration);
             scenario_success_count = scenario_success_count + 1;
             
-            % Optional: Real-time visualization in worker
-            if config.enable_visualization && scenario_num == 1
+            % Optional extra worker-side visualization (disabled by default).
+            if config.enable_realtime_viz && config.enable_visualization && scenario_num == 1
                 try
                     autlVisualizeMissionRealtime(mission_cfg.session_id, 1.0);
                 catch

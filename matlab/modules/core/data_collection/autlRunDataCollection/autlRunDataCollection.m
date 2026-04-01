@@ -33,6 +33,12 @@ end
 if ~isfield(mission_config, 'enable_visualization')
     mission_config.enable_visualization = true;  % Default: enable visualization
 end
+if ~isfield(mission_config, 'reuse_visualization_window')
+    mission_config.reuse_visualization_window = true;
+end
+if ~isfield(mission_config, 'save_realtime_viz_snapshot')
+    mission_config.save_realtime_viz_snapshot = false;
+end
 if ~isfield(mission_config, 'log_prefix')
     mission_config.log_prefix = '';
 end
@@ -127,11 +133,29 @@ fprintf('%s[AutoLandingDataCollection] Landing Pad Center: [%.2f, %.2f, %.2f], S
 
 % Setup real-time visualization if enabled
 fig_handle = [];
+viz_state = struct('enabled', false);
 if mission_config.enable_visualization
     try
-        fig_handle = figure('Name', 'AutoLanding Real-time Data Collection', 'NumberTitle', 'off', ...
-            'Position', [100, 100, 1200, 600]);
-        set(fig_handle, 'CloseRequestFcn', '');  % Prevent accidental closure
+        persistent autl_viz_cache
+        need_new_figure = true;
+        if mission_config.reuse_visualization_window && ~isempty(autl_viz_cache) && ...
+                isstruct(autl_viz_cache) && isfield(autl_viz_cache, 'fig') && isgraphics(autl_viz_cache.fig)
+            need_new_figure = false;
+        end
+
+        if need_new_figure
+            fig_handle = figure('Name', 'AutoLanding Real-time Data Collection', 'NumberTitle', 'off', ...
+                'Position', [100, 100, 1200, 600]);
+            set(fig_handle, 'CloseRequestFcn', @(src, ~) set(src, 'Visible', 'off'));
+            autl_viz_cache = autlInitRealtimeVizLayout(fig_handle);
+        else
+            fig_handle = autl_viz_cache.fig;
+            set(fig_handle, 'Visible', 'on');
+        end
+
+        autl_viz_cache = autlResetRealtimeVizLayout(autl_viz_cache, mission_config.session_id);
+        viz_state = autl_viz_cache;
+        viz_state.enabled = true;
     catch
         fprintf('%s[AutoLandingDataCollection] Warning: Could not create visualization figure\n', log_prefix);
     end
@@ -285,43 +309,33 @@ try
                 vehicle_state.velocity(1), vehicle_state.velocity(2), vehicle_state.velocity(3));
             
             % Update real-time visualization every 10 samples
-            if mission_config.enable_visualization && ~isempty(fig_handle) && mod(sample_idx, 10) == 0
+            if viz_state.enabled && mod(sample_idx, 10) == 0 && isgraphics(viz_state.fig)
                 try
-                    clf(fig_handle);
-                    
                     % Extract current trajectory
                     pos_xyz = raw_data.position_xyz(1:sample_idx, :);
                     vel_norm = vecnorm(raw_data.velocity_xyz(1:sample_idx, :), 2, 2);
                     alt = pos_xyz(:, 3);
-                    
-                    % 2x2 subplots
-                    subplot(2, 2, 1);
-                    plot3(pos_xyz(:, 1), pos_xyz(:, 2), pos_xyz(:, 3), 'b-', 'LineWidth', 1);
-                    hold on; plot3(pos_xyz(end, 1), pos_xyz(end, 2), pos_xyz(end, 3), 'ro', 'MarkerSize', 8);
-                    xlabel('X (m)'); ylabel('Y (m)'); zlabel('Z (m)');
-                    title('3D Trajectory');
-                    grid on;
-                    
-                    subplot(2, 2, 2);
-                    plot(1:sample_idx, alt, 'g-', 'LineWidth', 1);
-                    xlabel('Sample'); ylabel('Altitude (m)');
-                    title(sprintf('Altitude (Current: %.2f m)', alt(end)));
-                    grid on;
-                    
-                    subplot(2, 2, 3);
-                    plot(1:sample_idx, vel_norm, 'r-', 'LineWidth', 1);
-                    xlabel('Sample'); ylabel('Velocity (m/s)');
-                    title(sprintf('Velocity Norm (Current: %.2f m/s)', vel_norm(end)));
-                    grid on;
-                    
-                    subplot(2, 2, 4);
                     battery_v = raw_data.battery_voltage(1:sample_idx);
-                    plot(1:sample_idx, battery_v, 'm-', 'LineWidth', 1);
-                    xlabel('Sample'); ylabel('Voltage (V)');
-                    title(sprintf('Battery Voltage (Current: %.2f V)', battery_v(end)));
-                    grid on;
-                    
-                    drawnow;
+
+                    set(viz_state.traj_line, 'XData', pos_xyz(:, 1), 'YData', pos_xyz(:, 2), 'ZData', pos_xyz(:, 3));
+                    set(viz_state.traj_head, 'XData', pos_xyz(end, 1), 'YData', pos_xyz(end, 2), 'ZData', pos_xyz(end, 3));
+                    set(viz_state.alt_line, 'XData', 1:sample_idx, 'YData', alt);
+                    set(viz_state.vel_line, 'XData', 1:sample_idx, 'YData', vel_norm);
+                    set(viz_state.bat_line, 'XData', 1:sample_idx, 'YData', battery_v);
+
+                    status_text = sprintf(['Session: %s\nSample: %d\nElapsed: %.1fs\nActual Hz: %.2f\n', ...
+                        'Mode: %s\nArmed: %d\nPos: [%.2f, %.2f, %.2f]\nVel: [%.2f, %.2f, %.2f]'], ...
+                        mission_config.session_id, sample_idx, t_elapsed, sample_idx / max(t_elapsed, 1e-3), ...
+                        char(string(vehicle_state.mode)), vehicle_state.armed, ...
+                        vehicle_state.position(1), vehicle_state.position(2), vehicle_state.position(3), ...
+                        vehicle_state.velocity(1), vehicle_state.velocity(2), vehicle_state.velocity(3));
+                    set(viz_state.status_text, 'String', status_text);
+
+                    title(viz_state.alt_ax, sprintf('Altitude (Current: %.2f m)', alt(end)));
+                    title(viz_state.vel_ax, sprintf('Velocity Norm (Current: %.2f m/s)', vel_norm(end)));
+                    title(viz_state.bat_ax, sprintf('Battery Voltage (Current: %.2f V)', battery_v(end)));
+
+                    drawnow limitrate nocallbacks;
                 catch
                     % Silent fail to avoid disrupting collection
                 end
@@ -409,13 +423,13 @@ try
         sample_idx, t_elapsed, sample_idx / t_elapsed);
     fprintf('%s[AutoLandingDataCollection] Output: %s\n', log_prefix, sessionDir);
     
-    % Save and close visualization
-    if mission_config.enable_visualization && ~isempty(fig_handle)
+    % Optionally save visualization snapshot for this scenario.
+    if mission_config.enable_visualization && mission_config.save_realtime_viz_snapshot && ...
+            ~isempty(fig_handle) && isgraphics(fig_handle)
         try
             viz_file = fullfile(sessionDir, 'realtime_collection_viz.png');
             saveas(fig_handle, viz_file);
             fprintf('%s[AutoLandingDataCollection] Real-time visualization saved: %s\n', log_prefix, viz_file);
-            close(fig_handle);
         catch
             % Silent fail
         end
@@ -726,6 +740,58 @@ try
     fclose(fid);
 catch ME
     warning('Failed to save raw CSV: %s', ME.message);
+end
+
+function viz = autlInitRealtimeVizLayout(fig_handle)
+% Create once and update line handles each refresh to avoid flicker and dropped updates.
+
+viz = struct();
+viz.fig = fig_handle;
+
+viz.traj_ax = subplot(2, 2, 1, 'Parent', fig_handle);
+viz.traj_line = plot3(viz.traj_ax, nan, nan, nan, 'b-', 'LineWidth', 1.2);
+hold(viz.traj_ax, 'on');
+viz.traj_head = plot3(viz.traj_ax, nan, nan, nan, 'ro', 'MarkerSize', 8, 'LineWidth', 1.2);
+xlabel(viz.traj_ax, 'X (m)'); ylabel(viz.traj_ax, 'Y (m)'); zlabel(viz.traj_ax, 'Z (m)');
+title(viz.traj_ax, '3D Trajectory');
+grid(viz.traj_ax, 'on');
+viz.status_text = text(viz.traj_ax, 0.02, 0.98, '', 'Units', 'normalized', ...
+    'VerticalAlignment', 'top', 'HorizontalAlignment', 'left', 'FontSize', 8, ...
+    'BackgroundColor', 'w', 'Margin', 4);
+
+viz.alt_ax = subplot(2, 2, 2, 'Parent', fig_handle);
+viz.alt_line = plot(viz.alt_ax, nan, nan, 'g-', 'LineWidth', 1.2);
+xlabel(viz.alt_ax, 'Sample'); ylabel(viz.alt_ax, 'Altitude (m)');
+title(viz.alt_ax, 'Altitude');
+grid(viz.alt_ax, 'on');
+
+viz.vel_ax = subplot(2, 2, 3, 'Parent', fig_handle);
+viz.vel_line = plot(viz.vel_ax, nan, nan, 'r-', 'LineWidth', 1.2);
+xlabel(viz.vel_ax, 'Sample'); ylabel(viz.vel_ax, 'Velocity (m/s)');
+title(viz.vel_ax, 'Velocity Norm');
+grid(viz.vel_ax, 'on');
+
+viz.bat_ax = subplot(2, 2, 4, 'Parent', fig_handle);
+viz.bat_line = plot(viz.bat_ax, nan, nan, 'm-', 'LineWidth', 1.2);
+xlabel(viz.bat_ax, 'Sample'); ylabel(viz.bat_ax, 'Voltage (V)');
+title(viz.bat_ax, 'Battery Voltage');
+grid(viz.bat_ax, 'on');
+end
+
+function viz = autlResetRealtimeVizLayout(viz, session_id)
+% Reset line buffers when starting a new scenario while reusing one figure.
+
+if ~isstruct(viz) || ~isfield(viz, 'fig') || ~isgraphics(viz.fig)
+    return;
+end
+
+set(viz.traj_line, 'XData', nan, 'YData', nan, 'ZData', nan);
+set(viz.traj_head, 'XData', nan, 'YData', nan, 'ZData', nan);
+set(viz.alt_line, 'XData', nan, 'YData', nan);
+set(viz.vel_line, 'XData', nan, 'YData', nan);
+set(viz.bat_line, 'XData', nan, 'YData', nan);
+set(viz.status_text, 'String', sprintf('Session: %s\nWaiting for samples...', session_id));
+title(viz.traj_ax, sprintf('3D Trajectory (%s)', session_id), 'Interpreter', 'none');
 end
 end
 
