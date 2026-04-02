@@ -389,7 +389,11 @@ if endsWith(ns, '/')
     ns = ns(1:end-1);
 end
 
-check_cmd = 'bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; ros2 pkg list 2>/dev/null | grep -q "^mavros$"''';
+repo_root = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(mfilename('fullpath')))))));
+iicc26_setup = fullfile(fileparts(repo_root), 'IICC26_ws', 'install', 'setup.bash');
+source_overlay = sprintf('[ -f "%s" ] && source "%s" >/dev/null 2>&1; ', iicc26_setup, iicc26_setup);
+
+check_cmd = ['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' source_overlay 'set -u; ros2 pkg list 2>/dev/null | grep -q "^mavros$"'''];
 [check_rc, ~] = system(check_cmd);
 if check_rc ~= 0
     result.status = 'mavros_not_installed';
@@ -401,14 +405,14 @@ shell_timeout_s = max(1, ceil(timeout_s + 1));
 
 switch lower(action)
     case 'status'
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 topic echo --once %s/state''', ...
-            shell_timeout_s, ns);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 topic echo --once %s/state''', ...
+            source_overlay, shell_timeout_s, ns);
     case 'arm'
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: true}"''', ...
-            shell_timeout_s, ns);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: true}"''', ...
+            source_overlay, shell_timeout_s, ns);
     case 'disarm'
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: false}"''', ...
-            shell_timeout_s, ns);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: false}"''', ...
+            source_overlay, shell_timeout_s, ns);
     case 'set_mode'
         if ~isfield(params, 'mode')
             result.status = 'mode_set_failed';
@@ -416,18 +420,18 @@ switch lower(action)
             return;
         end
         mode_name = char(string(params.mode));
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/set_mode mavros_msgs/srv/SetMode "{base_mode: 0, custom_mode: \"%s\"}"''', ...
-            shell_timeout_s, ns, mode_name);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/set_mode mavros_msgs/srv/SetMode "{base_mode: 0, custom_mode: \"%s\"}"''', ...
+            source_overlay, shell_timeout_s, ns, mode_name);
     case 'takeoff'
         h = 3.0;
         if isfield(params, 'height')
             h = double(params.height);
         end
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/takeoff mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: %.3f}"''', ...
-            shell_timeout_s, ns, h);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/cmd/takeoff mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: %.3f}"''', ...
+            source_overlay, shell_timeout_s, ns, h);
     case 'land'
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/land mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: 0.0}"''', ...
-            shell_timeout_s, ns);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/cmd/land mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: 0.0}"''', ...
+            source_overlay, shell_timeout_s, ns);
     case 'set_velocity'
         if ~isfield(params, 'vx') || ~isfield(params, 'vy') || ~isfield(params, 'vz')
             result.status = 'velocity_failed';
@@ -437,8 +441,8 @@ switch lower(action)
         vx = double(params.vx);
         vy = double(params.vy);
         vz = double(params.vz);
-        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 topic pub --once %s/setpoint_velocity/cmd_vel_unstamped geometry_msgs/msg/Twist "{linear: {x: %.4f, y: %.4f, z: %.4f}, angular: {x: 0.0, y: 0.0, z: 0.0}}"''', ...
-            shell_timeout_s, ns, vx, vy, vz);
+        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 topic pub --once %s/setpoint_velocity/cmd_vel_unstamped geometry_msgs/msg/Twist "{linear: {x: %.4f, y: %.4f, z: %.4f}, angular: {x: 0.0, y: 0.0, z: 0.0}}"''', ...
+            source_overlay, shell_timeout_s, ns, vx, vy, vz);
     otherwise
         result.status = 'unknown_action';
         result.error_message = sprintf('Unknown action: %s', action);

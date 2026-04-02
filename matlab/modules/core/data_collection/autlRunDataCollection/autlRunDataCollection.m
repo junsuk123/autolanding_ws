@@ -239,8 +239,22 @@ if mission_config.gazebo_server_mode
 else
     fprintf('%s[AutoLandingDataCollection] Gazebo Mode: GUI\n', log_prefix);
 end
+can_open_viz_figure = mission_config.enable_visualization;
+viz_disable_reason = "";
 if mission_config.enable_visualization
+    if ~usejava('desktop')
+        can_open_viz_figure = false;
+        viz_disable_reason = "desktop graphics unavailable in this MATLAB session";
+    elseif isunix && isempty(getenv('DISPLAY'))
+        can_open_viz_figure = false;
+        viz_disable_reason = "DISPLAY is not set";
+    end
+end
+
+if mission_config.enable_visualization && can_open_viz_figure
     fprintf('%s[AutoLandingDataCollection] Real-time Visualization: ENABLED\n', log_prefix);
+elseif mission_config.enable_visualization
+    fprintf('%s[AutoLandingDataCollection] Real-time Visualization: DISABLED (%s)\n', log_prefix, char(viz_disable_reason));
 else
     fprintf('%s[AutoLandingDataCollection] Real-time Visualization: DISABLED\n', log_prefix);
 end
@@ -257,7 +271,7 @@ autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_started', autlFl
 fig_handle = [];
 viz_state = struct('enabled', false);
 persistent autl_viz_cache
-if mission_config.enable_visualization
+if can_open_viz_figure
     try
         if mission_config.force_close_stale_visualizations
             keep_fig = [];
@@ -288,6 +302,8 @@ if mission_config.enable_visualization
     catch
         fprintf('%s[AutoLandingDataCollection] Warning: Could not create visualization figure\n', log_prefix);
     end
+elseif mission_config.enable_visualization
+    fprintf('%s[AutoLandingDataCollection] Info: Skipping figure initialization (non-fatal).\n', log_prefix);
 end
 
 % Cleanup handler for graceful interrupt (Ctrl+C)
@@ -307,7 +323,8 @@ try
     control_cfg.flow_log_file = flow_log_file;
     control_cfg.flow_context = autlFlowMerge(flow_ctx, struct('module_scope', 'autlRunDataCollection'));
     control_cfg.flow_log_all_actions = false;
-    fprintf('%s[AutoLandingDataCollection] Connecting to vehicle via MAVProxy...\n', log_prefix);
+    fprintf('%s[AutoLandingDataCollection] Connecting to vehicle via %s (namespace=%s)...\n', ...
+        log_prefix, upper(char(string(mission_config.control_backend))), char(string(mission_config.mavros_namespace)));
 
     % Publish landing pad spec topic so downstream consumers can subscribe.
     landing_pad_publish_status = autlPublishLandingPadTopic(mission_config, sessionDir, log_prefix);

@@ -47,6 +47,26 @@ function mission_result = autlAutonomousMission(trajectory_table, initial_state,
     if ~isfield(cfg.mission, 'velocity_scale_factor')
         cfg.mission.velocity_scale_factor = 1.0; % scale trajectory velocity
     end
+    if ~isfield(cfg, 'mav') || ~isstruct(cfg.mav)
+        cfg.mav = struct();
+    end
+    if ~isfield(cfg.mav, 'allow_port_fallback')
+        cfg.mav.allow_port_fallback = true;
+    end
+    if cfg.mission.use_ros_control
+        if ~isfield(cfg, 'control') || ~isstruct(cfg.control)
+            cfg.control = struct();
+        end
+        if ~isfield(cfg.control, 'backend') || strlength(string(cfg.control.backend)) == 0
+            cfg.control.backend = 'mavros';
+        end
+        if ~isfield(cfg.control, 'allow_backend_fallback')
+            cfg.control.allow_backend_fallback = true;
+        end
+        if ~isfield(cfg.control, 'mavros_namespace') || strlength(string(cfg.control.mavros_namespace)) == 0
+            cfg.control.mavros_namespace = '/mavros';
+        end
+    end
     
     % Start mission timer
     mission_start_time = tic;

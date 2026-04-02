@@ -38,7 +38,7 @@ function AutoLandingMainFull(varargin)
     enable_auto_motion = true;          % Send MAVLink velocity setpoints during collection
     takeoff_height_m = 3.0;             % Takeoff altitude used before motion commands
     enable_multi_drone_profiles = true; % Enable worker-specific MAVLink/model/spawn/motion profiles
-    control_backend = 'mavproxy';       % 'mavproxy' (default) or 'mavros'
+    control_backend = 'mavros';         % 'mavproxy' or 'mavros' (default: mavros)
     control_backend_fallback = true;    % If mavros control fails/unavailable, fallback to mavproxy
     mavros_namespace = '/mavros';       % ROS2 MAVROS namespace when control_backend='mavros'
     mavros_namespace_prefix = '/mavros_w'; % Worker-specific MAVROS namespaces: /mavros_w1, /mavros_w2, ...
@@ -62,7 +62,7 @@ function AutoLandingMainFull(varargin)
     aruco_visibility_poll_interval_s = 2.0;
     aruco_visibility_min_markers = 1;
     spawn_layout_mode = 'auto';          % auto = square-ish, square = near-square, rectangle = wider rectangle
-    spawn_layout_spacing_m = 8.8;        % Common spacing for drone/pad formation cells
+    spawn_layout_spacing_m = 3.2;        % Tighter spacing so drones stay near the central landing pad
     spawn_layout_center_xy = landing_pad_center(1:2);
     mavlink_init_timeout_s = 120.0;     % Startup heartbeat readiness budget (seconds)
     mavlink_poll_interval_s = 1.0;      % Polling interval for startup heartbeat checks
@@ -151,7 +151,6 @@ function AutoLandingMainFull(varargin)
         system('pkill -f "gz sim" 2>/dev/null');
         system('pkill -f "arducopter" 2>/dev/null');
         system('pkill -f "mavproxy" 2>/dev/null');
-        system('pkill -f "rviz2" 2>/dev/null');
         system('pkill -f "ros_gz_bridge parameter_bridge" 2>/dev/null');
         system('pkill -f "ros2_aruco" 2>/dev/null');
         system('pkill -f "publish_multi_drone_odom.py" 2>/dev/null');
@@ -198,7 +197,7 @@ function AutoLandingMainFull(varargin)
         end
         xauth_env = getenv('XAUTHORITY');
 
-        % Resource path is required so model:// URIs resolve (runway, iris_with_gimbal, ...)
+        % Resource path is required so model:// URIs resolve (iris_with_gimbal, ArUco, ...)
         gz_resource_path = sprintf('%s:%s:%s:%s:%s', gazebo_pkg_dir, fullfile(gazebo_pkg_dir, 'models'), world_dir, ...
             launch_world_dir, fullfile(aruco_pkg_dir, 'gz-world'));
         gz_system_plugin_path = fullfile(gazebo_pkg_dir, 'build');
@@ -614,6 +613,63 @@ end
 
 world_text = fileread(base_world_path);
 
+% Remove the runway from the generated world so data collection happens over a
+% landing-pad scene rather than a runway scene.
+world_text = regexprep(world_text, '<include>\s*<uri>model://runway</uri>[\s\S]*?</include>\s*', '', 'once');
+
+% Add a flat ground plane back so the drones do not fall through the scene.
+if ~contains(world_text, "<model name='ground_plane'>") && ~contains(world_text, '<model name="ground_plane">')
+    ground_plane_block = sprintf([ ...
+        '    <model name=''ground_plane''>\n' ...
+        '      <static>1</static>\n' ...
+        '      <link name=''link''>\n' ...
+        '        <collision name=''collision''>\n' ...
+        '          <geometry>\n' ...
+        '            <plane>\n' ...
+        '              <normal>0 0 1</normal>\n' ...
+        '              <size>100 100</size>\n' ...
+        '            </plane>\n' ...
+        '          </geometry>\n' ...
+        '          <surface>\n' ...
+        '            <friction>\n' ...
+        '              <ode>\n' ...
+        '                <mu>100</mu>\n' ...
+        '                <mu2>50</mu2>\n' ...
+        '              </ode>\n' ...
+        '              <torsional>\n' ...
+        '                <ode/>\n' ...
+        '              </torsional>\n' ...
+        '            </friction>\n' ...
+        '            <contact>\n' ...
+        '              <ode/>\n' ...
+        '            </contact>\n' ...
+        '            <bounce/>\n' ...
+        '          </surface>\n' ...
+        '          <max_contacts>10</max_contacts>\n' ...
+        '        </collision>\n' ...
+        '        <visual name=''visual''>\n' ...
+        '          <cast_shadows>0</cast_shadows>\n' ...
+        '          <geometry>\n' ...
+        '            <plane>\n' ...
+        '              <normal>0 0 1</normal>\n' ...
+        '              <size>100 100</size>\n' ...
+        '            </plane>\n' ...
+        '          </geometry>\n' ...
+        '          <material>\n' ...
+        '            <script>\n' ...
+        '              <uri>file://media/materials/scripts/gazebo.material</uri>\n' ...
+        '              <name>Gazebo/Grey</name>\n' ...
+        '            </script>\n' ...
+        '          </material>\n' ...
+        '        </visual>\n' ...
+        '        <self_collide>0</self_collide>\n' ...
+        '        <enable_wind>0</enable_wind>\n' ...
+        '        <kinematic>0</kinematic>\n' ...
+        '      </link>\n' ...
+        '    </model>\n']);
+    world_text = regexprep(world_text, '</world>', [ground_plane_block '  </world>'], 'once');
+end
+
 % Remove the default single-drone include; we will inject explicit includes for all drones.
 world_text = regexprep(world_text, '<include>\s*<uri>model://iris_with_gimbal</uri>[\s\S]*?</include>', '', 'once');
 
@@ -925,7 +981,18 @@ for row = 1:grid_rows
     end
 end
 
-pad_spawn_xy = autlRotatePointsAroundCenter(drone_spawn_xy, center_xy, 45.0);
+pad_spawn_xy = zeros(num_items, 2);
+pad_offset_m = max(0.6, min(1.2, 0.35 * spacing_m));
+for idx = 1:num_items
+    direction_xy = center_xy - drone_spawn_xy(idx, :);
+    direction_norm = norm(direction_xy);
+    if direction_norm < 1.0e-6
+        direction_unit = [1.0, 0.0];
+    else
+        direction_unit = direction_xy / direction_norm;
+    end
+    pad_spawn_xy(idx, :) = drone_spawn_xy(idx, :) + pad_offset_m * direction_unit;
+end
 end
 
 function [grid_cols, grid_rows] = autlComputeFormationGridShape(num_items, layout_mode)
@@ -973,6 +1040,23 @@ if ~isfile(launch_script)
     return;
 end
 
+if nargin < 2 || strlength(string(ros_domain_id)) == 0
+    ros_domain_id = 'auto';
+end
+if nargin < 3 || isempty(num_workers)
+    num_workers = 1;
+end
+
+cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
+    launch_script, char(string(ros_domain_id)), num_workers);
+[rc, ~] = system(cmd);
+if rc == 0
+    fprintf('[Pipeline] RViz monitor launch requested (log: /tmp/autolanding_rviz.log)\n');
+else
+    fprintf('[Pipeline] WARNING: Failed to launch RViz monitor (rc=%d)\n', rc);
+end
+end
+
 function autlLaunchMavrosBridge(rootDir, ros_domain_id, num_workers, namespace_prefix)
 % Launch worker-specific MAVROS nodes in the background.
 
@@ -999,23 +1083,6 @@ if rc == 0
     fprintf('[Pipeline] MAVROS bridge launch requested (log: /tmp/autolanding_mavros_launcher.log)\n');
 else
     fprintf('[Pipeline] WARNING: Failed to launch MAVROS bridge (rc=%d)\n', rc);
-end
-end
-
-if nargin < 2 || strlength(string(ros_domain_id)) == 0
-    ros_domain_id = 'auto';
-end
-if nargin < 3 || isempty(num_workers)
-    num_workers = 1;
-end
-
-cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
-    launch_script, char(string(ros_domain_id)), num_workers);
-[rc, ~] = system(cmd);
-if rc == 0
-    fprintf('[Pipeline] RViz monitor launch requested (log: /tmp/autolanding_rviz.log)\n');
-else
-    fprintf('[Pipeline] WARNING: Failed to launch RViz monitor (rc=%d)\n', rc);
 end
 end
 
@@ -1354,7 +1421,6 @@ try
     system('pkill -f "gz sim" 2>/dev/null');
     system('pkill -f "arducopter" 2>/dev/null');
     system('pkill -f "mavproxy.py" 2>/dev/null');
-    system('pkill -f "rviz2" 2>/dev/null');
     system('pkill -f "ros_gz_bridge parameter_bridge" 2>/dev/null');
     system('pkill -f "ros2_aruco" 2>/dev/null');
     system('pkill -f "publish_multi_drone_odom.py" 2>/dev/null');

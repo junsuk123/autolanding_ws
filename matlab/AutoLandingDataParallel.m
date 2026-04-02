@@ -93,6 +93,19 @@ worker_config.gazebo_server_mode = gazebo_server_mode;  % Server or GUI
 worker_config.enable_visualization = enable_visualization;  % Real-time monitoring
 worker_config.mission_overrides = mission_overrides;
 worker_config.num_workers = num_workers;
+worker_config.progress_queue = [];
+
+% Root cause guard:
+% parfor uses process workers, and process workers cannot reliably own desktop figure windows.
+% Keep visualization on the client side and disable worker-local MATLAB figures.
+if num_workers > 1 && worker_config.enable_visualization
+    worker_config.enable_visualization = false;
+    fprintf(['[AutoLandingDataParallel] Info: Worker MATLAB figure visualization disabled in multi-worker mode ', ...
+        '(parfor process workers do not support stable desktop figure rendering).\n']);
+    fprintf('[AutoLandingDataParallel] Info: Client real-time monitor enabled for multi-worker progress visualization.\n');
+    autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_figure_viz_disabled', struct( ...
+        'reason', 'parfor_process_workers_no_stable_desktop_figure', 'num_workers', num_workers));
+end
 
 % Create shared worker log root once to avoid mkdir race warnings in workers
 if ~exist(worker_config.worker_log_dir, 'dir')
@@ -137,6 +150,13 @@ else
     % Use parallel pool with DataQueue (MATLAB 9.9+)
     fprintf('[AutoLandingDataParallel] Creating parallel pool (%d workers)...\n\n', num_workers);
     autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'parallel_pool_create', struct('num_workers', num_workers));
+
+    monitor_enabled = logical(enable_visualization && num_workers > 1);
+    autlParallelMonitor('close');
+    if monitor_enabled
+        autlParallelMonitor('init', num_workers, scenarios_per_worker, session_id);
+    end
+    monitor_cleanup = onCleanup(@() autlParallelMonitor('close')); %#ok<NASGU>
     
     % Always recreate pool to avoid stale worker function cache across reruns.
     pool = gcp('nocreate');
@@ -151,6 +171,12 @@ else
         pctRunOnAll('rehash; clear functions; clear autlRunDataCollection; clear autlDataCollectorWorker;');
     catch
         % Non-fatal; parfor will still proceed.
+    end
+
+    dq = parallel.pool.DataQueue;
+    if monitor_enabled
+        afterEach(dq, @(msg) autlParallelMonitor('update', msg));
+        worker_config.progress_queue = dq;
     end
     
     % Launch workers via parfor
@@ -190,6 +216,10 @@ else
     fprintf('\n[AutoLandingDataParallel] %d/%d workers completed successfully.\n', success_count, num_workers);
     if success_count < num_workers
         error('AutoLanding:ParallelCollectionFailed', '[AutoLandingDataParallel] %d/%d workers failed.', num_workers - success_count, num_workers);
+    end
+
+    if monitor_enabled
+        autlParallelMonitor('flush');
     end
 end
 
@@ -278,6 +308,135 @@ end
 function cellArr = cellArray(n)
 % Helper for MATLAB compatibility
 cellArr = cell(n, 1);
+end
+
+function autlParallelMonitor(action, varargin)
+% Client-side visualization for multi-worker progress using DataQueue updates.
+
+persistent st
+if isempty(st)
+    st = struct('initialized', false);
+end
+
+switch lower(string(action))
+    case "init"
+        num_workers = varargin{1};
+        scenarios_per_worker = varargin{2};
+        session_id = char(string(varargin{3}));
+
+        st = struct();
+        st.initialized = true;
+        st.num_workers = num_workers;
+        st.scenarios_per_worker = scenarios_per_worker;
+        st.started = zeros(1, num_workers);
+        st.success = zeros(1, num_workers);
+        st.failed = zeros(1, num_workers);
+        st.current = zeros(1, num_workers);
+
+        try
+            st.fig = figure('Name', sprintf('AutoLanding Parallel Monitor (%s)', session_id), ...
+                'NumberTitle', 'off', 'Tag', 'autl_parallel_monitor', 'Position', [120, 120, 980, 480]);
+            st.ax1 = subplot(1, 2, 1, 'Parent', st.fig);
+            st.bar_started = bar(st.ax1, 1:num_workers, st.started, 0.25, 'FaceColor', [0.3 0.6 0.9]);
+            hold(st.ax1, 'on');
+            st.bar_success = bar(st.ax1, 1:num_workers, st.success, 0.25, 'FaceColor', [0.2 0.7 0.3]);
+            st.bar_failed = bar(st.ax1, 1:num_workers, st.failed, 0.25, 'FaceColor', [0.85 0.25 0.25]);
+            hold(st.ax1, 'off');
+            ylim(st.ax1, [0, max(1, scenarios_per_worker)]);
+            xticks(st.ax1, 1:num_workers);
+            xlabel(st.ax1, 'Worker ID');
+            ylabel(st.ax1, 'Scenario Count');
+            title(st.ax1, 'Started / Success / Failed');
+            legend(st.ax1, {'Started','Success','Failed'}, 'Location', 'northoutside');
+            grid(st.ax1, 'on');
+
+            st.ax2 = subplot(1, 2, 2, 'Parent', st.fig);
+            st.txt = text(st.ax2, 0.02, 0.98, '', 'Units', 'normalized', 'VerticalAlignment', 'top', ...
+                'FontName', 'Courier', 'FontSize', 10);
+            axis(st.ax2, 'off');
+            autlParallelMonitorRefreshText();
+            drawnow;
+        catch
+            st.initialized = false;
+        end
+
+    case "update"
+        if ~st.initialized
+            return;
+        end
+        msg = varargin{1};
+        if ~isstruct(msg) || ~isfield(msg, 'worker_id') || ~isfield(msg, 'event')
+            return;
+        end
+        wid = double(msg.worker_id);
+        if wid < 1 || wid > st.num_workers
+            return;
+        end
+
+        ev = lower(char(string(msg.event)));
+        switch ev
+            case 'scenario_started'
+                if isfield(msg, 'scenario_num')
+                    st.current(wid) = max(st.current(wid), double(msg.scenario_num));
+                end
+                st.started(wid) = max(st.started(wid), st.current(wid));
+            case 'scenario_success'
+                st.success(wid) = st.success(wid) + 1;
+            case 'scenario_failed'
+                st.failed(wid) = st.failed(wid) + 1;
+            otherwise
+        end
+
+        autlParallelMonitorRefreshBars();
+        autlParallelMonitorRefreshText();
+        drawnow limitrate;
+
+    case "flush"
+        if st.initialized
+            autlParallelMonitorRefreshBars();
+            autlParallelMonitorRefreshText();
+            drawnow;
+        end
+
+    case "close"
+        if st.initialized && isfield(st, 'fig') && isgraphics(st.fig)
+            try
+                close(st.fig);
+            catch
+            end
+        end
+        st = struct('initialized', false);
+end
+
+    function autlParallelMonitorRefreshBars()
+        if ~st.initialized || ~isgraphics(st.bar_started)
+            return;
+        end
+        set(st.bar_started, 'YData', st.started);
+        set(st.bar_success, 'YData', st.success);
+        set(st.bar_failed, 'YData', st.failed);
+        ymax = max([1, st.scenarios_per_worker, max(st.started), max(st.success + st.failed)]);
+        ylim(st.ax1, [0, ymax]);
+    end
+
+    function autlParallelMonitorRefreshText()
+        if ~st.initialized || ~isgraphics(st.txt)
+            return;
+        end
+        lines = strings(0, 1);
+        total_success = sum(st.success);
+        total_failed = sum(st.failed);
+        total_started = sum(st.started);
+        total_target = st.num_workers * st.scenarios_per_worker;
+        lines(end+1) = sprintf('Total progress: started=%d, success=%d, failed=%d / target=%d', ...
+            total_started, total_success, total_failed, total_target);
+        lines(end+1) = "";
+        for wi = 1:st.num_workers
+            lines(end+1) = sprintf('Worker %d  current=%d  started=%d  success=%d  failed=%d', ...
+                wi, st.current(wi), st.started(wi), st.success(wi), st.failed(wi));
+        end
+        set(st.txt, 'String', strjoin(cellstr(lines), newline));
+    end
 end
 
 function autlParallelCleanup(session_dir, num_workers)

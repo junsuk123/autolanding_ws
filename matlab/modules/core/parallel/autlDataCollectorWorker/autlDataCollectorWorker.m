@@ -60,6 +60,9 @@ end
 if ~isfield(config, 'reset_ardupilot_each_scenario')
     config.reset_ardupilot_each_scenario = true;
 end
+if ~isfield(config, 'progress_queue')
+    config.progress_queue = [];
+end
 
 % Create worker output directory
 if ~exist(config.worker_log_dir, 'dir')
@@ -90,6 +93,8 @@ fprintf(log_fid, '[Worker %d] Config: scenarios=%d, rate=%d Hz, duration=%.0f se
 autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_started', struct( ...
     'worker_id', worker_id, 'scenarios_per_worker', config.scenarios_per_worker, ...
     'sample_rate', config.sample_rate, 'scenario_duration', config.scenario_duration));
+autlWorkerSendProgress(config, struct('event', 'worker_started', 'worker_id', worker_id, ...
+    'scenarios_per_worker', config.scenarios_per_worker));
 
 % Register cleanup for this worker
 worker_state = struct('log_fid', log_fid, 'worker_id', worker_id);
@@ -106,6 +111,8 @@ try
             worker_id, scenario_num, config.scenarios_per_worker, datetime('now'));
         autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_started', struct( ...
             'worker_id', worker_id, 'scenario_num', scenario_num));
+        autlWorkerSendProgress(config, struct('event', 'scenario_started', 'worker_id', worker_id, ...
+            'scenario_num', scenario_num));
 
         % Force-refresh function cache so workers do not keep stale local-function maps.
         try
@@ -161,6 +168,15 @@ try
                 fprintf(log_fid, '[Worker %d] MAVLink ready gate passed: %s\n', worker_id, ready_msg);
             else
                 fprintf(log_fid, '[Worker %d] MAVLink ready gate warning: %s\n', worker_id, ready_msg);
+            end
+        end
+
+        if config.num_workers > 1
+            [barrier_ok, barrier_msg] = autlWaitForWorkerStartBarrier(config, worker_id, log_fid);
+            if barrier_ok
+                fprintf(log_fid, '[Worker %d] Start barrier passed: %s\n', worker_id, barrier_msg);
+            else
+                fprintf(log_fid, '[Worker %d] Start barrier warning: %s\n', worker_id, barrier_msg);
             end
         end
 
@@ -229,6 +245,8 @@ try
             autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_completed', struct( ...
                 'worker_id', worker_id, 'scenario_num', scenario_num, 'samples', samples, 'duration_s', duration));
             scenario_success_count = scenario_success_count + 1;
+            autlWorkerSendProgress(config, struct('event', 'scenario_success', 'worker_id', worker_id, ...
+                'scenario_num', scenario_num, 'samples', samples, 'duration_s', duration));
             
         catch ME
             if autlWorkerIsUserInterrupt(ME)
@@ -240,6 +258,8 @@ try
             autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_failed', struct( ...
                 'worker_id', worker_id, 'scenario_num', scenario_num, 'error', ME.message));
             scenario_fail_count = scenario_fail_count + 1;
+            autlWorkerSendProgress(config, struct('event', 'scenario_failed', 'worker_id', worker_id, ...
+                'scenario_num', scenario_num, 'error', ME.message));
         end
         
         % Brief delay between scenarios
@@ -252,6 +272,8 @@ try
         worker_id, datetime('now'), scenario_success_count, scenario_fail_count);
     autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_completed', struct( ...
         'worker_id', worker_id, 'success_count', scenario_success_count, 'fail_count', scenario_fail_count));
+    autlWorkerSendProgress(config, struct('event', 'worker_completed', 'worker_id', worker_id, ...
+        'success_count', scenario_success_count, 'fail_count', scenario_fail_count));
 
     if scenario_fail_count > 0
         error('AutoLanding:WorkerScenarioFailed', 'Worker %d had %d failed scenario(s).', worker_id, scenario_fail_count);
@@ -275,6 +297,22 @@ end
 
 fclose(log_fid);
 fprintf('[Worker %d] Exiting.\n', worker_id);
+end
+
+function autlWorkerSendProgress(config, msg)
+% Send non-critical progress events to client-side monitor.
+
+if nargin < 2 || ~isstruct(msg)
+    return;
+end
+
+try
+    if isstruct(config) && isfield(config, 'progress_queue') && ~isempty(config.progress_queue)
+        send(config.progress_queue, msg);
+    end
+catch
+    % Monitoring must not affect data collection stability.
+end
 end
 
 function tf = autlWorkerIsUserInterrupt(ME)
@@ -338,10 +376,10 @@ if ~isfield(mission_cfg, 'landing_pad_center')
     mission_cfg.landing_pad_center = [0.0, 0.0, 0.0];
 end
 if ~isfield(mission_cfg, 'spawn_radius_m')
-    mission_cfg.spawn_radius_m = 0.8;
+    mission_cfg.spawn_radius_m = 0.35;
 end
 if ~isfield(mission_cfg, 'spawn_angle_deg')
-    mission_cfg.spawn_angle_deg = 35.0;
+    mission_cfg.spawn_angle_deg = 15.0;
 end
 if ~isfield(mission_cfg, 'reset_spawn_z_m')
     mission_cfg.reset_spawn_z_m = 0.195;
@@ -640,6 +678,47 @@ end
 
 ok = mode_all_ok;
 msg = char(strjoin(parts, ', '));
+end
+
+function [ok, msg] = autlWaitForWorkerStartBarrier(config, worker_id, log_fid)
+% Synchronize worker launch so multi-drone collection starts together.
+
+ok = false;
+msg = 'not_enabled';
+
+if nargin < 1 || ~isstruct(config) || ~isfield(config, 'output_dir') || ~isfield(config, 'num_workers')
+    return;
+end
+
+barrier_dir = fullfile(config.output_dir, '.worker_start_barrier');
+if ~exist(barrier_dir, 'dir')
+    mkdir(barrier_dir);
+end
+
+ready_file = fullfile(barrier_dir, sprintf('worker_%02d.ready', worker_id));
+fid = fopen(ready_file, 'w');
+if fid >= 0
+    fprintf(fid, 'worker=%d\n', worker_id);
+    fclose(fid);
+end
+
+start_t = tic;
+timeout_s = 30.0;
+while toc(start_t) < timeout_s
+    ready_files = dir(fullfile(barrier_dir, 'worker_*.ready'));
+    if numel(ready_files) >= max(1, round(config.num_workers))
+        ok = true;
+        msg = sprintf('workers_ready=%d/%d', numel(ready_files), config.num_workers);
+        return;
+    end
+    pause(0.25);
+end
+
+ready_files = dir(fullfile(barrier_dir, 'worker_*.ready'));
+msg = sprintf('timeout waiting for workers_ready=%d/%d', numel(ready_files), config.num_workers);
+if nargin >= 3 && ~isempty(log_fid)
+    fprintf(log_fid, '[Barrier] %s\n', msg);
+end
 end
 
 function emsg = autlSanitizeMavError(raw_msg)

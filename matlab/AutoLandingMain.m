@@ -82,6 +82,8 @@ function AutoLandingMain(varargin)
             
             % Load config
             cfg = autlDefaultConfig();
+            cfg.mission.use_ros_control = true;
+            cfg.mav.allow_port_fallback = true;
             
             % Start real-time visualization in background
             session_id = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
@@ -136,6 +138,7 @@ function AutoLandingMain(varargin)
             cfg = autlDefaultConfig();
             cfg.mission.trajectory_tracking_enabled = true;
             cfg.mission.use_ros_control = false; % Use MAVProxy control
+            cfg.mav.allow_port_fallback = true;
             
             mission_result = autlAutonomousMission(trajectory, initial_state, target_state, cfg, rootDir);
             

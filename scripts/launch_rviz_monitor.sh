@@ -119,4 +119,19 @@ nohup python3 "$ROOT_DIR/scripts/publish_multi_drone_odom.py" --workers "$WORKER
   > /tmp/autolanding_multi_drone_odom.log 2>&1 &
 
 echo "[INFO] launching RViz"
-exec env QT_QPA_PLATFORM=xcb rviz2 -d "$autolanding_rviz_cfg"
+
+restart_count=0
+max_restarts=5
+while true; do
+  set +e
+  env QT_QPA_PLATFORM=xcb rviz2 -d "$autolanding_rviz_cfg"
+  rviz_exit=$?
+  set -e
+  echo "[WARN] rviz2 exited with code ${rviz_exit}"
+  restart_count=$((restart_count + 1))
+  if [[ "$restart_count" -ge "$max_restarts" ]]; then
+    echo "[ERROR] rviz2 exceeded restart limit (${max_restarts}); stopping launcher"
+    exit "$rviz_exit"
+  fi
+  sleep 2
+done

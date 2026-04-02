@@ -62,10 +62,17 @@ fi
 # Test MAVProxy connection
 echo ""
 echo "[CONNECT] Testing MAVProxy connection to vehicle..."
-if timeout 20 mavproxy.py --master tcp:127.0.0.1:5760 --cmd="status" 2>/dev/null | grep -q "Detected vehicle"; then
-    echo "[OK] Vehicle heartbeat confirmed"
+vehicle_port=""
+for PORT in 5762 5760; do
+    if timeout 20 mavproxy.py --master tcp:127.0.0.1:${PORT} --cmd="status" 2>/dev/null | grep -q "Detected vehicle"; then
+        vehicle_port="${PORT}"
+        break
+    fi
+done
+if [[ -n "$vehicle_port" ]]; then
+    echo "[OK] Vehicle heartbeat confirmed at tcp:127.0.0.1:${vehicle_port}"
 else
-    echo "[WARNING] Vehicle not responding"
+    echo "[WARNING] Vehicle not responding on tcp:127.0.0.1:5762 or tcp:127.0.0.1:5760"
     echo "[WARNING] Simulation will proceed but vehicle control may fail"
 fi
 
