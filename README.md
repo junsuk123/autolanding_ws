@@ -200,7 +200,9 @@ Real-time 3D trajectory monitor + telemetry dashboard.
 **Prerequisites:**
 - Gazebo Sim running: `gz sim -s iris_runway.sdf`
 - ArduPilot SITL running with valid defaults path (example in Section 7.1)
-- MAVProxy available: `mavproxy.py`
+- Control backend available:
+  - Default: MAVProxy (`mavproxy.py`)
+  - Optional: MAVROS (`mavros`, `mavros_msgs`)
 
 **Launch mission with real-time viz:**
 
@@ -304,7 +306,9 @@ AutoLandingMain('mission')                # Immediate cleanup
 **Prerequisites:**
 - Gazebo Sim running: `gz sim -s iris_runway.sdf`
 - ArduPilot SITL running with valid defaults path (example in Section 7.1)
-- MAVProxy available: `mavproxy.py`
+- Control backend available:
+  - Default: MAVProxy (`mavproxy.py`)
+  - Optional: MAVROS (`mavros`, `mavros_msgs`)
 
 **Launch mission:**
 
@@ -833,6 +837,24 @@ cd "$HOME/ardupilot"
 **Terminal 3: MATLAB mission (after both above are running)**
 ```bash
 bash scripts/run_mission_matlab.sh
+```
+
+**Optional: enable MAVROS backend (instead of MAVProxy)**
+
+```bash
+# Install once (Ubuntu/Debian, ROS2 Humble)
+bash scripts/install_mavros2.sh
+
+# Verify packages and launchability
+bash scripts/verify_mavros2_setup.sh
+```
+
+In `matlab/AutoLandingMainFull.m`, set mission control backend:
+
+```matlab
+cfg.mission.control_backend = 'mavros';
+cfg.mission.control_backend_fallback = true;  % fallback to mavproxy when unavailable
+cfg.mission.auto_launch_mavros_bridge = true; % launch worker-scoped mavros nodes
 ```
 
 ### 7.2 Integration flow

@@ -99,6 +99,27 @@ end
 if ~isfield(mission_config, 'mavlink_precheck_timeout_s')
     mission_config.mavlink_precheck_timeout_s = 12.0;
 end
+if ~isfield(mission_config, 'control_backend')
+    mission_config.control_backend = 'mavproxy';
+end
+if ~isfield(mission_config, 'control_backend_fallback')
+    mission_config.control_backend_fallback = true;
+end
+if ~isfield(mission_config, 'mavros_namespace')
+    mission_config.mavros_namespace = '/mavros';
+end
+if ~isfield(mission_config, 'aruco_markers_topic')
+    mission_config.aruco_markers_topic = '/aruco_markers';
+end
+if ~isfield(mission_config, 'aruco_visibility_probe_timeout_s')
+    mission_config.aruco_visibility_probe_timeout_s = 1.0;
+end
+if ~isfield(mission_config, 'aruco_visibility_poll_interval_s')
+    mission_config.aruco_visibility_poll_interval_s = 2.0;
+end
+if ~isfield(mission_config, 'aruco_visibility_min_markers')
+    mission_config.aruco_visibility_min_markers = 1;
+end
 if ~isfield(mission_config, 'mavlink_master')
     mission_config.mavlink_master = 'tcp:127.0.0.1:5762';
 end
@@ -279,7 +300,10 @@ try
         'fallback_master', mission_config.mavlink_master_fallback, ...
         'allow_simulated_fallback', mission_config.allow_simulated_fallback, ...
         'query_interval_s', mission_config.telemetry_query_interval_s);
-    control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master));
+    control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master, 'allow_port_fallback', true));
+    control_cfg.control = struct('backend', mission_config.control_backend, ...
+        'allow_backend_fallback', logical(mission_config.control_backend_fallback), ...
+        'mavros_namespace', mission_config.mavros_namespace);
     control_cfg.flow_log_file = flow_log_file;
     control_cfg.flow_context = autlFlowMerge(flow_ctx, struct('module_scope', 'autlRunDataCollection'));
     control_cfg.flow_log_all_actions = false;
@@ -293,16 +317,18 @@ try
         'follow_enabled', logical(landing_pad_runtime.follow_enabled), 'apply_set_pose', logical(landing_pad_runtime.apply_set_pose))));
 
     % Arm/takeoff once so vehicle actually moves during collection.
-    control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
+    control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf, 'precheck_failed', false);
     if mission_config.enable_auto_motion
         if mission_config.require_mavlink_for_auto_motion
             [precheck_res, boot_msg] = autlWaitForMavlinkPrecheckTop(mission_config, control_cfg);
 
             if ~precheck_res.is_success
-                mission_config.enable_auto_motion = false;
+                control_state.precheck_failed = true;
                 precheck_msg = autlCompactMavErrorTop(precheck_res.error_message);
-                fprintf('%s[AutoLandingDataCollection] Warning: MAVLink precheck failed, auto motion disabled for this run: %s\n', ...
+                fprintf('%s[AutoLandingDataCollection] Warning: MAVLink precheck failed: %s\n', ...
                     log_prefix, precheck_msg);
+                fprintf('%s[AutoLandingDataCollection] Info: continuing with a best-effort arm/takeoff attempt, then set_pose fallback if needed.\n', ...
+                    log_prefix);
                 autlFlowLog(flow_log_file, 'autlRunDataCollection', 'mavlink_precheck_failed', autlFlowMerge(flow_ctx, struct( ...
                     'message', precheck_msg, 'fallback_bootstrap', char(string(boot_msg)))));
                 if exist('boot_msg', 'var') && strlength(string(boot_msg)) > 0 && ~strcmp(string(boot_msg), "not_used")
@@ -353,6 +379,9 @@ try
             control_state.takeoff_sent = false;
             fprintf('%s[AutoLandingDataCollection] Warning: skipping takeoff because arming failed\n', log_prefix);
         end
+        control_state.aruco_visible = false;
+        control_state.last_aruco_check_time = -inf;
+        control_state.last_aruco_check_message = '';
         pause(0.5);
     else
         fprintf('%s[AutoLandingDataCollection] Auto motion control: DISABLED\n', log_prefix);
@@ -399,6 +428,21 @@ try
     while toc(t_start) < mission_config.max_duration
         elapsed_s = toc(t_start);
         collection_elapsed_s = elapsed_s;
+
+        if mission_config.enable_auto_motion && control_state.takeoff_sent && ~control_state.aruco_visible && ...
+                (elapsed_s - control_state.last_aruco_check_time) >= mission_config.aruco_visibility_poll_interval_s
+            [aruco_ok, aruco_msg] = autlWaitForArucoMarkersVisible(mission_config, log_prefix);
+            control_state.last_aruco_check_time = elapsed_s;
+            control_state.last_aruco_check_message = aruco_msg;
+            if aruco_ok
+                control_state.aruco_visible = true;
+                fprintf('%s[AutoLandingDataCollection] ArUco marker visible: %s\n', log_prefix, aruco_msg);
+                autlFlowLog(flow_log_file, 'autlRunDataCollection', 'aruco_marker_visible', autlFlowMerge(flow_ctx, struct( ...
+                    'elapsed_s', elapsed_s, 'message', aruco_msg, 'topic', char(string(mission_config.aruco_markers_topic)))));
+            elseif mod(sample_idx, max(1, round(mission_config.sample_rate))) == 0
+                fprintf('%s[AutoLandingDataCollection] Waiting for ArUco marker visibility: %s\n', log_prefix, aruco_msg);
+            end
+        end
         
         % Sample timing
         if toc(t_last_sample) >= sample_interval
@@ -456,7 +500,7 @@ try
             % Feed velocity setpoints so SITL keeps moving around landing pad.
                 if mission_config.enable_auto_motion && control_state.takeoff_sent && ...
                     (elapsed_s - control_state.last_control_time) >= effective_control_interval
-                if isfield(vehicle_state, 'has_local_position') && vehicle_state.has_local_position > 0
+                if control_state.aruco_visible && isfield(vehicle_state, 'has_local_position') && vehicle_state.has_local_position > 0
                     control_cmd = autlComputeTrackingVelocity(vehicle_state.position, mission_config);
                     vel_struct = struct('vx', control_cmd(1), 'vy', control_cmd(2), 'vz', control_cmd(3), ...
                         'duration', min(0.05, effective_control_interval));
@@ -468,6 +512,8 @@ try
                         fprintf('%s[AutoLandingDataCollection] Motion cmd vx=%.2f vy=%.2f vz=%.2f mode=%s\n', ...
                             log_prefix, control_cmd(1), control_cmd(2), control_cmd(3), char(string(vehicle_state.mode)));
                     end
+                elseif ~control_state.aruco_visible && mod(sample_idx, max(1, round(mission_config.sample_rate))) == 0
+                    fprintf('%s[AutoLandingDataCollection] Hover hold active; waiting for ArUco marker before motion commands.\n', log_prefix);
                 elseif mod(sample_idx, max(1, round(mission_config.sample_rate))) == 0
                     fprintf('%s[AutoLandingDataCollection] Warning: LOCAL_POSITION_NED unavailable, skipping velocity command this cycle.\n', log_prefix);
                 end
@@ -1725,6 +1771,114 @@ try
 catch
     % Silent fail to avoid interfering with cleanup process
 end
+end
+
+function [ok, msg] = autlWaitForArucoMarkersVisible(mission_config, log_prefix)
+% Probe the ROS2 ArUco topic and report success only when one or more markers are visible.
+
+ok = false;
+msg = '';
+
+if nargin < 2
+    log_prefix = '';
+end
+
+topic_name = '/aruco_markers';
+if isfield(mission_config, 'aruco_markers_topic') && strlength(string(mission_config.aruco_markers_topic)) > 0
+    topic_name = char(string(mission_config.aruco_markers_topic));
+end
+
+min_markers = 1;
+if isfield(mission_config, 'aruco_visibility_min_markers') && ~isempty(mission_config.aruco_visibility_min_markers)
+    min_markers = max(1, double(mission_config.aruco_visibility_min_markers));
+end
+
+probe_timeout_s = 1.0;
+if isfield(mission_config, 'aruco_visibility_probe_timeout_s') && ~isempty(mission_config.aruco_visibility_probe_timeout_s)
+    probe_timeout_s = max(0.1, double(mission_config.aruco_visibility_probe_timeout_s));
+end
+
+aruco_ws_setup = '/home/j/gz_ros2_aruco_ws/install/setup.bash';
+payload_json = jsonencode(struct( ...
+    'topic', topic_name, ...
+    'min_markers', min_markers, ...
+    'timeout_s', probe_timeout_s));
+payload_b64 = matlab.net.base64encode(uint8(payload_json));
+
+py_lines = { ...
+    'import base64, json, os, sys, time' ...
+    'try:' ...
+    '  import rclpy' ...
+    '  from rclpy.node import Node' ...
+    '  from ros2_aruco_interfaces.msg import ArucoMarkers' ...
+    'except Exception as exc:' ...
+    '  print(json.dumps({"ok": False, "error": "import_failed: %s" % exc, "marker_count": 0}))' ...
+    '  sys.exit(2)' ...
+    ['payload = json.loads(base64.b64decode("' payload_b64 '").decode())'] ...
+    'topic_name = payload["topic"]' ...
+    'timeout_s = float(payload["timeout_s"])' ...
+    'min_markers = int(payload["min_markers"] )' ...
+    'class MarkerProbe(Node):' ...
+    '  def __init__(self, topic_name, min_markers):' ...
+    '    super().__init__("autl_aruco_probe")' ...
+    '    self.topic_name = topic_name' ...
+    '    self.min_markers = int(min_markers)' ...
+    '    self.last_count = 0' ...
+    '    self.seen = False' ...
+    '    self._sub = self.create_subscription(ArucoMarkers, topic_name, self._on_msg, 10)' ...
+    '  def _on_msg(self, msg):' ...
+    '    count = len(getattr(msg, "marker_ids", []))' ...
+    '    self.last_count = count' ...
+    '    if count >= self.min_markers:' ...
+    '      self.seen = True' ...
+    'rclpy.init(args=None)' ...
+    'node = MarkerProbe(topic_name, min_markers)' ...
+    'deadline = time.time() + timeout_s' ...
+    'try:' ...
+    '  while rclpy.ok() and time.time() < deadline and not node.seen:' ...
+    '    rclpy.spin_once(node, timeout_sec=min(0.2, max(0.01, deadline - time.time())))' ...
+    'finally:' ...
+    '  try:' ...
+    '    node.destroy_node()' ...
+    '  finally:' ...
+    '    rclpy.shutdown()' ...
+    'print(json.dumps({"ok": bool(node.seen), "marker_count": int(node.last_count), "topic": topic_name, "min_markers": min_markers, "timeout_s": timeout_s}))' ...
+    };
+
+py_code = strjoin(py_lines, newline);
+cmd = sprintf([ ...
+    'bash -lc ''set -e; source /opt/ros/humble/setup.bash; ' ...
+    'if [ -f "%s" ]; then source "%s"; fi; ' ...
+    'python3 - <<''PY''\n%s\nPY'''], ...
+    aruco_ws_setup, aruco_ws_setup, py_code);
+
+[status, output] = system(cmd);
+output = strtrim(output);
+if status == 0 && ~isempty(output)
+    try
+        probe_res = jsondecode(output);
+        ok = isfield(probe_res, 'ok') && logical(probe_res.ok);
+        marker_count = 0;
+        if isfield(probe_res, 'marker_count')
+            marker_count = double(probe_res.marker_count);
+        end
+        if ok
+            msg = sprintf('topic=%s markers=%d', topic_name, marker_count);
+        else
+            msg = sprintf('topic=%s markers=%d wait=%.1fs', topic_name, marker_count, probe_timeout_s);
+        end
+    catch
+        ok = false;
+        msg = output;
+    end
+else
+    if isempty(output)
+        msg = sprintf('probe failed for topic=%s', topic_name);
+    else
+        msg = output;
+    end
+end
+
 end
 
 function [ok, msg] = autlWaitForHoverState(mav_config, target_alt_m, timeout_s)

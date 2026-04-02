@@ -30,6 +30,9 @@ function result = autlMavproxyControl(action, params, cfg)
     
     % Timeout for control operation (seconds)
     timeout = 4;
+    if isfield(cfg, 'mav') && isfield(cfg.mav, 'timeout_s') && ~isempty(cfg.mav.timeout_s)
+        timeout = max(0.5, min(10.0, double(cfg.mav.timeout_s)));
+    end
 
     flow_log_file = '';
     flow_ctx = struct();
@@ -47,6 +50,41 @@ function result = autlMavproxyControl(action, params, cfg)
     if flow_log_all_actions
         autlFlowLog(flow_log_file, 'autlMavproxyControl', 'action_started', autlFlowMerge(flow_ctx, struct( ...
             'action', char(string(action)), 'master', char(string(master_conn)))));
+    end
+
+    control_backend = 'mavproxy';
+    allow_backend_fallback = true;
+    if isfield(cfg, 'control') && isstruct(cfg.control)
+        if isfield(cfg.control, 'backend') && strlength(string(cfg.control.backend)) > 0
+            control_backend = lower(char(string(cfg.control.backend)));
+        end
+        if isfield(cfg.control, 'allow_backend_fallback')
+            allow_backend_fallback = logical(cfg.control.allow_backend_fallback);
+        end
+    end
+
+    if strcmp(control_backend, 'mavros')
+        [mavros_result, mavros_ok] = autlRunMavrosControl(action, params, cfg, timeout);
+        if mavros_ok
+            result = mavros_result;
+            should_log_result = flow_log_all_actions || ~result.is_success;
+            if should_log_result
+                autlFlowLog(flow_log_file, 'autlMavproxyControl', 'action_result', autlFlowMerge(flow_ctx, struct( ...
+                    'action', char(string(action)), 'status', char(string(result.status)), ...
+                    'is_success', logical(result.is_success), 'error', char(string(result.error_message)))));
+            end
+            return;
+        end
+        if ~allow_backend_fallback
+            result = mavros_result;
+            should_log_result = flow_log_all_actions || ~result.is_success;
+            if should_log_result
+                autlFlowLog(flow_log_file, 'autlMavproxyControl', 'action_result', autlFlowMerge(flow_ctx, struct( ...
+                    'action', char(string(action)), 'status', char(string(result.status)), ...
+                    'is_success', logical(result.is_success), 'error', char(string(result.error_message)))));
+            end
+            return;
+        end
     end
 
     % Default to a single designated endpoint per worker to avoid
@@ -331,6 +369,112 @@ function result = autlMavproxyControl(action, params, cfg)
             'action', char(string(action)), 'status', char(string(result.status)), ...
             'is_success', logical(result.is_success), 'error', char(string(result.error_message)))));
     end
+end
+
+function [result, ok] = autlRunMavrosControl(action, params, cfg, timeout_s)
+% Run action via ROS2 MAVROS CLI path. Returns ok=true only on successful action completion.
+
+result = struct('status', 'mavros_unavailable', 'output', '', 'error_message', '', 'is_success', false);
+ok = false;
+
+ns = '/mavros';
+if isfield(cfg, 'control') && isstruct(cfg.control) && isfield(cfg.control, 'mavros_namespace') && ...
+        strlength(string(cfg.control.mavros_namespace)) > 0
+    ns = char(string(cfg.control.mavros_namespace));
+end
+if ~startsWith(ns, '/')
+    ns = ['/' ns];
+end
+if endsWith(ns, '/')
+    ns = ns(1:end-1);
+end
+
+check_cmd = 'bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; ros2 pkg list 2>/dev/null | grep -q "^mavros$"''';
+[check_rc, ~] = system(check_cmd);
+if check_rc ~= 0
+    result.status = 'mavros_not_installed';
+    result.error_message = 'mavros package is not installed in ROS2 environment';
+    return;
+end
+
+shell_timeout_s = max(1, ceil(timeout_s + 1));
+
+switch lower(action)
+    case 'status'
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 topic echo --once %s/state''', ...
+            shell_timeout_s, ns);
+    case 'arm'
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: true}"''', ...
+            shell_timeout_s, ns);
+    case 'disarm'
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: false}"''', ...
+            shell_timeout_s, ns);
+    case 'set_mode'
+        if ~isfield(params, 'mode')
+            result.status = 'mode_set_failed';
+            result.error_message = 'set_mode requires params.mode';
+            return;
+        end
+        mode_name = char(string(params.mode));
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/set_mode mavros_msgs/srv/SetMode "{base_mode: 0, custom_mode: \"%s\"}"''', ...
+            shell_timeout_s, ns, mode_name);
+    case 'takeoff'
+        h = 3.0;
+        if isfield(params, 'height')
+            h = double(params.height);
+        end
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/takeoff mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: %.3f}"''', ...
+            shell_timeout_s, ns, h);
+    case 'land'
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 service call %s/cmd/land mavros_msgs/srv/CommandTOL "{min_pitch: 0.0, yaw: 0.0, latitude: 0.0, longitude: 0.0, altitude: 0.0}"''', ...
+            shell_timeout_s, ns);
+    case 'set_velocity'
+        if ~isfield(params, 'vx') || ~isfield(params, 'vy') || ~isfield(params, 'vz')
+            result.status = 'velocity_failed';
+            result.error_message = 'set_velocity requires params.vx, params.vy, params.vz';
+            return;
+        end
+        vx = double(params.vx);
+        vy = double(params.vy);
+        vz = double(params.vz);
+        cmd = sprintf('bash -lc ''source /opt/ros/humble/setup.bash >/dev/null 2>&1; timeout %d ros2 topic pub --once %s/setpoint_velocity/cmd_vel_unstamped geometry_msgs/msg/Twist "{linear: {x: %.4f, y: %.4f, z: %.4f}, angular: {x: 0.0, y: 0.0, z: 0.0}}"''', ...
+            shell_timeout_s, ns, vx, vy, vz);
+    otherwise
+        result.status = 'unknown_action';
+        result.error_message = sprintf('Unknown action: %s', action);
+        return;
+end
+
+[rc, out] = system(cmd);
+result.output = out;
+if rc == 0
+    result.is_success = true;
+    switch lower(action)
+        case 'arm'
+            result.status = 'armed';
+        case 'disarm'
+            result.status = 'disarmed';
+        case 'takeoff'
+            result.status = 'takeoff_initiated';
+        case 'land'
+            result.status = 'land_initiated';
+        case 'set_mode'
+            result.status = 'mode_set';
+        case 'set_velocity'
+            result.status = 'velocity_sent';
+        otherwise
+            result.status = 'status_obtained';
+    end
+    ok = true;
+else
+    result.is_success = false;
+    result.status = 'mavros_action_failed';
+    if rc == 124
+        result.error_message = sprintf('mavros action timeout (%ds): %s', shell_timeout_s, strtrim(out));
+    else
+        result.error_message = strtrim(out);
+    end
+end
 end
 
 function out = autlFlowMerge(base_payload, extra_payload)

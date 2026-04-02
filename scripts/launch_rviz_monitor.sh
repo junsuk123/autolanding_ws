@@ -58,9 +58,15 @@ source_if_exists "$HOME/SynologyDrive/INCSL/devel/INCSL/IICC26_ws/install/setup.
 export ROS_DOMAIN_ID="$(pick_domain_id)"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 
-# Avoid MATLAB-local Python packages and Qt libs from polluting ROS/RViz tools.
+# Avoid MATLAB-local Python packages and Qt GUI theme vars from polluting ROS/RViz tools.
 export PYTHONNOUSERSITE=1
-unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME || true
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+  SANITIZED_LD_LIBRARY_PATH="$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/usr/local/MATLAB' | paste -sd ':' -)"
+  export LD_LIBRARY_PATH="$SANITIZED_LD_LIBRARY_PATH"
+fi
+export QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-/usr/lib/x86_64-linux-gnu/qt5/plugins}"
+export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms}"
+unset QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME || true
 
 echo "[INFO] ROOT_DIR=$ROOT_DIR"
 echo "[INFO] ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
@@ -92,6 +98,7 @@ fi
 if [[ "$START_ARUCO" -eq 1 ]]; then
   if python3 - <<'PY' >/tmp/autolanding_aruco_depcheck.log 2>&1
 import numpy as np
+import cv2  # noqa: F401
 import transforms3d  # noqa: F401
 if not hasattr(np, 'float'):
     raise RuntimeError("numpy has no np.float alias required by installed transforms3d/ros2_aruco stack")

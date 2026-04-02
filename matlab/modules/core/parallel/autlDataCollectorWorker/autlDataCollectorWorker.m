@@ -435,6 +435,16 @@ if isfield(mission_cfg, 'mavlink_ready_poll_interval_s')
 end
 
 ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+ctrl_cfg.control = struct('backend', 'mavproxy', 'allow_backend_fallback', true, 'mavros_namespace', '/mavros');
+if isfield(mission_cfg, 'control_backend')
+    ctrl_cfg.control.backend = char(string(mission_cfg.control_backend));
+end
+if isfield(mission_cfg, 'control_backend_fallback')
+    ctrl_cfg.control.allow_backend_fallback = logical(mission_cfg.control_backend_fallback);
+end
+if isfield(mission_cfg, 'mavros_namespace')
+    ctrl_cfg.control.mavros_namespace = char(string(mission_cfg.mavros_namespace));
+end
 if isfield(mission_cfg, 'flow_log_file')
     ctrl_cfg.flow_log_file = mission_cfg.flow_log_file;
 end
@@ -512,6 +522,16 @@ if isfield(mission_cfg, 'reset_mode_sequence') && ~isempty(mission_cfg.reset_mod
 end
 
 ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+ctrl_cfg.control = struct('backend', 'mavproxy', 'allow_backend_fallback', true, 'mavros_namespace', '/mavros');
+if isfield(mission_cfg, 'control_backend')
+    ctrl_cfg.control.backend = char(string(mission_cfg.control_backend));
+end
+if isfield(mission_cfg, 'control_backend_fallback')
+    ctrl_cfg.control.allow_backend_fallback = logical(mission_cfg.control_backend_fallback);
+end
+if isfield(mission_cfg, 'mavros_namespace')
+    ctrl_cfg.control.mavros_namespace = char(string(mission_cfg.mavros_namespace));
+end
 if isfield(mission_cfg, 'flow_log_file')
     ctrl_cfg.flow_log_file = mission_cfg.flow_log_file;
 end

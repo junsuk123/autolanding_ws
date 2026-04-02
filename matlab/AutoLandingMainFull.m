@@ -38,6 +38,11 @@ function AutoLandingMainFull(varargin)
     enable_auto_motion = true;          % Send MAVLink velocity setpoints during collection
     takeoff_height_m = 3.0;             % Takeoff altitude used before motion commands
     enable_multi_drone_profiles = true; % Enable worker-specific MAVLink/model/spawn/motion profiles
+    control_backend = 'mavproxy';       % 'mavproxy' (default) or 'mavros'
+    control_backend_fallback = true;    % If mavros control fails/unavailable, fallback to mavproxy
+    mavros_namespace = '/mavros';       % ROS2 MAVROS namespace when control_backend='mavros'
+    mavros_namespace_prefix = '/mavros_w'; % Worker-specific MAVROS namespaces: /mavros_w1, /mavros_w2, ...
+    auto_launch_mavros_bridge = true;   % Launch MAVROS bridge automatically in STEP 0 when backend=mavros
 
     % RViz / ROS observability
     enable_rviz_monitor = true;
@@ -49,12 +54,19 @@ function AutoLandingMainFull(varargin)
     drone_body_size_m = 0.1;            % Reference body size for marker scaling (0.1 * 2^2 = 0.4 m)
     marker_size_multiplier = 3^2;       % Requested: 2 squared times drone size
     marker_size_m = drone_body_size_m * marker_size_multiplier;
-    landing_pad_center = [0.0, 0.0, 0.0];   % Fixed pad position [x, y, z]
+    landing_pad_center = [0.0, 0.0, 0.0];   % World center / primary ArUco pad position [x, y, z]
     landing_pad_size = [marker_size_m, marker_size_m];
     landing_pad_topic = '/autolanding/landing_pad';
-    drone_spawn_distance_m = 0.8;       % Drone distance from landing pad center
-    drone_spawn_angle_deg = 35.0;       % Fixed angle to keep start deterministic
-    landing_pad_distance_m = 1.15;      % Landing pad offset from each worker drone base spawn
+    aruco_markers_topic = '/aruco_markers';
+    aruco_visibility_probe_timeout_s = 1.0;
+    aruco_visibility_poll_interval_s = 2.0;
+    aruco_visibility_min_markers = 1;
+    spawn_layout_mode = 'auto';          % auto = square-ish, square = near-square, rectangle = wider rectangle
+    spawn_layout_spacing_m = 8.8;        % Common spacing for drone/pad formation cells
+    spawn_layout_center_xy = landing_pad_center(1:2);
+    mavlink_init_timeout_s = 120.0;     % Startup heartbeat readiness budget (seconds)
+    mavlink_poll_interval_s = 1.0;      % Polling interval for startup heartbeat checks
+    sitl_json_ready_timeout_s = 90.0;   % Wait budget for SITL JSON sensor bridge readiness
 
     % Train/Validation Split
     total_training_samples = 20;         % Total samples for training (including both train+val)
@@ -90,13 +102,22 @@ function AutoLandingMainFull(varargin)
     fprintf('    - Total Scenarios: %d\n', num_workers * scenarios_per_worker);
     fprintf('    - Auto Motion: %s (takeoff=%.1fm)\n', char(string(enable_auto_motion)), takeoff_height_m);
     fprintf('    - Multi-drone Profiles: %s\n', char(string(enable_multi_drone_profiles)));
+    fprintf('    - Control Backend: %s (fallback=%s, ns=%s)\n', ...
+        char(string(control_backend)), char(string(control_backend_fallback)), char(string(mavros_namespace)));
+    fprintf('    - MAVROS Auto Launch: %s (prefix=%s)\n', ...
+        char(string(auto_launch_mavros_bridge)), char(string(mavros_namespace_prefix)));
     fprintf('    - Landing Pad Topic: %s\n', landing_pad_topic);
     fprintf('    - ArUco Enabled: %s (id=%d)\n', char(string(use_aruco_landing_pad)), aruco_marker_id);
+    fprintf('    - ArUco Markers Topic: %s\n', aruco_markers_topic);
+    fprintf('    - ArUco Visibility Poll: %.1fs every %.1fs (%d marker minimum)\n', ...
+        aruco_visibility_probe_timeout_s, aruco_visibility_poll_interval_s, aruco_visibility_min_markers);
     fprintf('    - RViz Monitor: %s (ROS_DOMAIN_ID=%s)\n', char(string(enable_rviz_monitor)), char(string(ros_domain_id)));
     fprintf('    - Landing Pad Center: [%.2f, %.2f, %.2f]\n', landing_pad_center(1), landing_pad_center(2), landing_pad_center(3));
     fprintf('    - Landing Pad Size: [%.2f x %.2f] m\n', landing_pad_size(1), landing_pad_size(2));
-    fprintf('    - Drone Spawn Distance: %.2f m (<= 1.0 m)\n', drone_spawn_distance_m);
-    fprintf('    - Landing Pad Offset Distance: %.2f m\n', landing_pad_distance_m);
+    fprintf('    - Formation Layout: %s\n', char(string(spawn_layout_mode)));
+    fprintf('    - Formation Spacing: %.2f m\n', spawn_layout_spacing_m);
+    fprintf('    - MAVLink Init Timeout: %.1f s\n', mavlink_init_timeout_s);
+    fprintf('    - SITL JSON Ready Timeout: %.1f s\n', sitl_json_ready_timeout_s);
     fprintf('  Training:\n');
     fprintf('    - Train Samples: %d (%.0f%%)\n', num_train, train_ratio*100);
     fprintf('    - Val Samples: %d (%.0f%%)\n', num_val, (1-train_ratio)*100);
@@ -130,6 +151,11 @@ function AutoLandingMainFull(varargin)
         system('pkill -f "gz sim" 2>/dev/null');
         system('pkill -f "arducopter" 2>/dev/null');
         system('pkill -f "mavproxy" 2>/dev/null');
+        system('pkill -f "rviz2" 2>/dev/null');
+        system('pkill -f "ros_gz_bridge parameter_bridge" 2>/dev/null');
+        system('pkill -f "ros2_aruco" 2>/dev/null');
+        system('pkill -f "publish_multi_drone_odom.py" 2>/dev/null');
+        system('pkill -f "mavros_node" 2>/dev/null');
         pause(2);
         
         % Start Gazebo
@@ -142,15 +168,16 @@ function AutoLandingMainFull(varargin)
         world_dir = fullfile(gazebo_pkg_dir, 'worlds');
         base_world_path = fullfile(world_dir, 'iris_runway.sdf');
 
-        spawn_xy = autlComputeRadialPoint(landing_pad_center(1:2), drone_spawn_distance_m, drone_spawn_angle_deg);
-        spawn_yaw_deg = rad2deg(atan2(landing_pad_center(2) - spawn_xy(2), landing_pad_center(1) - spawn_xy(1)));
-        if norm(spawn_xy - landing_pad_center(1:2)) > 1.0
-            error('Spawn position exceeds 1 m radius from marker center.');
-        end
+        [drone_spawn_xy, pad_spawn_xy, layout_dims] = autlBuildFormationLayout(num_workers, spawn_layout_center_xy, ...
+            spawn_layout_spacing_m, spawn_layout_mode);
+        spawn_xy = drone_spawn_xy(1, :);
+        spawn_yaw_deg = rad2deg(atan2(pad_spawn_xy(1, 2) - drone_spawn_xy(1, 2), pad_spawn_xy(1, 1) - drone_spawn_xy(1, 1)));
+        layout_extent_m = max(vecnorm(drone_spawn_xy - spawn_layout_center_xy, 2, 2));
+        fprintf('[Pipeline] Formation grid: %d x %d, extent=%.2f m\n', layout_dims(1), layout_dims(2), layout_extent_m);
 
         worker_profiles = struct([]);
         if enable_multi_drone_profiles
-            worker_profiles = autlBuildWorkerProfiles(num_workers, spawn_xy, spawn_yaw_deg, takeoff_height_m, landing_pad_center, landing_pad_size, landing_pad_distance_m);
+            worker_profiles = autlBuildWorkerProfiles(num_workers, drone_spawn_xy, pad_spawn_xy, takeoff_height_m, landing_pad_center, landing_pad_size);
         end
 
         world_path_to_launch = base_world_path;
@@ -222,7 +249,7 @@ function AutoLandingMainFull(varargin)
                 error('Gazebo GUI did not start. Check DISPLAY and GZ_SIM_RESOURCE_PATH.');
             end
         end
-        pause(10);
+        pause(5);
         
         % Start ArduPilot SITL (single or multi-drone)
         fprintf('[Pipeline] Starting ArduPilot SITL...\n');
@@ -240,9 +267,9 @@ function AutoLandingMainFull(varargin)
         system(ap_cmd);
         pause(5);
         
-        % Extra wait time to ensure SITL and Gazebo JSON sensor bridge are synchronized
-        fprintf('[Pipeline] Waiting for ArduPilot initialization (allowing ~30s for JSON sensor bridge)...\n');
-        pause(15);  % Extended from 10s to 15s to give JSON bridge time to sync in multi-instance
+        % Give SITL and Gazebo a brief overlap window before readiness probes.
+        fprintf('[Pipeline] Waiting for ArduPilot initialization before readiness probes...\n');
+        pause(15);  % Brief boot window before polling JSON and MAVLink readiness
 
         [cam_topic_ok, ~] = system('bash -lc ''timeout 3 gz topic -l | grep -E "^/camera$" > /dev/null''');
         if cam_topic_ok == 0
@@ -251,23 +278,52 @@ function AutoLandingMainFull(varargin)
             fprintf('[Pipeline] WARNING: /camera not found in Gazebo transport topics\n');
         end
 
-        [aruco_topic_ok, ~] = system('bash -lc ''timeout 3 ros2 topic list 2>/dev/null | grep -E "^/aruco_markers$" > /dev/null''');
-        if aruco_topic_ok == 0
-            fprintf('[Pipeline] ArUco topic check: /aruco_markers available in ROS2\n');
-        else
-            fprintf('[Pipeline] WARNING: /aruco_markers not detected. Marker-vision loop is not active yet (bridge/detector launch needed).\n');
-        end
+        fprintf('[Pipeline] ArUco topic pre-check deferred until RViz/bridge launch completes\n');
 
         resolved_ros_domain_id = autlResolveRosDomainId(ros_domain_id);
         setenv('ROS_DOMAIN_ID', resolved_ros_domain_id);
         fprintf('[Pipeline] ROS domain resolved for MATLAB/workers: %s\n', resolved_ros_domain_id);
 
+        if strcmpi(control_backend, 'mavros') && auto_launch_mavros_bridge
+            autlLaunchMavrosBridge(rootDir, resolved_ros_domain_id, num_workers, mavros_namespace_prefix);
+        end
+
         if enable_rviz_monitor
             autlLaunchRvizMonitor(rootDir, ros_domain_id, num_workers);
+
+            aruco_wait_t0 = tic;
+            aruco_wait_timeout_s = 12.0;
+            aruco_wait_ok = false;
+            while toc(aruco_wait_t0) < aruco_wait_timeout_s
+                drawnow limitrate;
+                [aruco_topic_ok, ~] = system('bash -lc ''timeout 2 ros2 topic list 2>/dev/null | grep -E "^/aruco_markers$" > /dev/null''');
+                if aruco_topic_ok == 0
+                    aruco_wait_ok = true;
+                    break;
+                end
+                pause(1.0);
+            end
+
+            if aruco_wait_ok
+                fprintf('[Pipeline] ArUco topic check: /aruco_markers available in ROS2\n');
+            else
+                fprintf('[Pipeline] WARNING: /aruco_markers still not detected after %.0fs. Check /tmp/autolanding_aruco.log\n', aruco_wait_timeout_s);
+            end
+        else
+            fprintf('[Pipeline] RViz monitor disabled: skipping /aruco_markers availability check\n');
+        end
+
+        % Wait for JSON bridge readiness markers in SITL logs before heartbeat probes.
+        [json_ready, json_report] = autlWaitForSitlJsonReady(num_workers, enable_multi_drone_profiles, sitl_json_ready_timeout_s);
+        fprintf('%s', json_report);
+        if ~json_ready
+            error(['SITL JSON bridge is not ready. Check /tmp/autolanding_sitl/arducopter_I*.log and ' ...
+                   '/tmp/gz_sim.log for sensor path/port conflicts.']);
         end
 
         % Fail fast if MAVLink heartbeat is unavailable before parallel workers start.
-        [mav_ok, mav_report] = autlVerifyMavlinkHeartbeatReady(num_workers, enable_multi_drone_profiles);
+        [mav_ok, mav_report] = autlVerifyMavlinkHeartbeatReady(num_workers, enable_multi_drone_profiles, ...
+            mavlink_init_timeout_s, mavlink_poll_interval_s);
         fprintf('%s', mav_report);
         if ~mav_ok
             error(['MAVLink endpoints are not ready. Check /tmp/autolanding_sitl/arducopter_I*.log and ' ...
@@ -280,10 +336,18 @@ function AutoLandingMainFull(varargin)
         fprintf('════════════════════════════════════════════\n');
         mission_overrides = struct();
         mission_overrides.enable_auto_motion = enable_auto_motion;
+        mission_overrides.control_backend = control_backend;
+        mission_overrides.control_backend_fallback = control_backend_fallback;
+        mission_overrides.mavros_namespace = mavros_namespace;
+        mission_overrides.mavros_namespace_prefix = mavros_namespace_prefix;
         mission_overrides.takeoff_height_m = takeoff_height_m;
         mission_overrides.landing_pad_center = landing_pad_center;
         mission_overrides.landing_pad_size = landing_pad_size;
         mission_overrides.landing_pad_topic = landing_pad_topic;
+        mission_overrides.aruco_markers_topic = aruco_markers_topic;
+        mission_overrides.aruco_visibility_probe_timeout_s = aruco_visibility_probe_timeout_s;
+        mission_overrides.aruco_visibility_poll_interval_s = aruco_visibility_poll_interval_s;
+        mission_overrides.aruco_visibility_min_markers = aruco_visibility_min_markers;
         mission_overrides.telemetry_query_interval_s = 2.0;
         mission_overrides.control_interval_s = 2.0;
         mission_overrides.mavlink_precheck_timeout_s = 30.0;
@@ -296,9 +360,8 @@ function AutoLandingMainFull(varargin)
         mission_overrides.reset_model_name = 'iris_with_gimbal';
         mission_overrides.reset_ardupilot_each_scenario = true;
         mission_overrides.reset_mode_sequence = {'STABILIZE', 'GUIDED'};
-        mission_overrides.drone_spawn_distance_m = drone_spawn_distance_m;
-        mission_overrides.drone_spawn_angle_deg = drone_spawn_angle_deg;
-        mission_overrides.landing_pad_distance_m = landing_pad_distance_m;
+        mission_overrides.drone_spawn_distance_m = spawn_layout_spacing_m;
+        mission_overrides.landing_pad_distance_m = spawn_layout_spacing_m;
 
         if enable_multi_drone_profiles
             mission_overrides.worker_profiles = worker_profiles;
@@ -755,32 +818,37 @@ if isfile(template_cfg)
 end
 end
 
-function profiles = autlBuildWorkerProfiles(num_workers, base_spawn_xy, base_spawn_yaw_deg, base_takeoff_height_m, landing_pad_center, landing_pad_size, landing_pad_distance_m)
-% Build worker-specific profiles so each worker can represent a distinct drone state.
+function profiles = autlBuildWorkerProfiles(num_workers, drone_spawn_xy, pad_spawn_xy, base_takeoff_height_m, landing_pad_center, landing_pad_size)
+% Build worker-specific profiles so each worker follows the shared formation layout.
 
-if nargin < 7 || isempty(landing_pad_distance_m)
-    landing_pad_distance_m = 1.15;
+if nargin < 2 || isempty(drone_spawn_xy)
+    drone_spawn_xy = zeros(max(1, num_workers), 2);
+end
+if nargin < 3 || isempty(pad_spawn_xy)
+    pad_spawn_xy = drone_spawn_xy;
+end
+if nargin < 4 || isempty(base_takeoff_height_m)
+    base_takeoff_height_m = 3.0;
+end
+if nargin < 5 || isempty(landing_pad_center)
+    landing_pad_center = [0.0, 0.0, 0.0];
+end
+if nargin < 6 || isempty(landing_pad_size)
+    landing_pad_size = [0.4, 0.4];
 end
 
 profiles = repmat(struct(), num_workers, 1);
 state_cycle = {'aggressive', 'conservative', 'orbit-heavy', 'balanced'};
 
-spawn_spacing_m = 3.0;
-grid_cols = ceil(sqrt(num_workers));
-grid_rows = ceil(num_workers / grid_cols);
-grid_origin = [-(grid_cols - 1) * 0.5, -(grid_rows - 1) * 0.5] .* spawn_spacing_m;
-
 for i = 1:num_workers
-    idx0 = i - 1;
-    col = mod(idx0, grid_cols);
-    row = floor(idx0 / grid_cols);
-    spawn_offset = [grid_origin(1) + col * spawn_spacing_m, grid_origin(2) + row * spawn_spacing_m];
-    spawn_xy_i = base_spawn_xy + spawn_offset;
-    yaw_i = base_spawn_yaw_deg;
+    spawn_xy_i = double(drone_spawn_xy(i, 1:2));
+    pad_xy_i = double(pad_spawn_xy(i, 1:2));
+    yaw_i = rad2deg(atan2(pad_xy_i(2) - spawn_xy_i(2), pad_xy_i(1) - spawn_xy_i(1)));
 
     profiles(i).worker_state_tag = sprintf('drone_%d_%s', i, state_cycle{mod(i-1, numel(state_cycle)) + 1});
     profiles(i).mavlink_master = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (i - 1));
     profiles(i).mavlink_master_fallback = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (i - 1));
+    profiles(i).mavros_namespace = sprintf('/mavros_w%d', i);
     if i == 1
         profiles(i).reset_model_name = 'iris_with_gimbal';
     else
@@ -789,7 +857,6 @@ for i = 1:num_workers
     profiles(i).reset_spawn_xy = spawn_xy_i;
     profiles(i).reset_spawn_yaw_deg = yaw_i;
     profiles(i).takeoff_height_m = base_takeoff_height_m + 0.3 * (i - 1);
-    pad_xy_i = autlComputeRadialPoint(spawn_xy_i, landing_pad_distance_m, yaw_i);
     profiles(i).landing_pad_center = [pad_xy_i(1), pad_xy_i(2), landing_pad_center(3)];
     profiles(i).landing_pad_size = landing_pad_size;
 
@@ -824,12 +891,77 @@ for i = 1:num_workers
 end
 end
 
-function point_xy = autlComputeRadialPoint(center_xy, distance_m, angle_deg)
-% Compute a 2D point at a fixed radial distance and angle from a center.
+function [drone_spawn_xy, pad_spawn_xy, grid_dims] = autlBuildFormationLayout(num_items, center_xy, spacing_m, layout_mode)
+% Build a centered formation layout for drones and landing pads.
 
-ang_rad = deg2rad(angle_deg);
-point_xy = [center_xy(1) + distance_m * cos(ang_rad), ...
-            center_xy(2) + distance_m * sin(ang_rad)];
+if nargin < 1 || isempty(num_items)
+    num_items = 1;
+end
+if nargin < 2 || isempty(center_xy)
+    center_xy = [0.0, 0.0];
+end
+if nargin < 3 || isempty(spacing_m)
+    spacing_m = 3.0;
+end
+if nargin < 4 || isempty(layout_mode)
+    layout_mode = 'auto';
+end
+
+[grid_cols, grid_rows] = autlComputeFormationGridShape(num_items, layout_mode);
+grid_dims = [grid_cols, grid_rows];
+
+x_offsets = ((0:grid_cols-1) - (grid_cols - 1) * 0.5) * spacing_m;
+y_offsets = ((0:grid_rows-1) - (grid_rows - 1) * 0.5) * spacing_m;
+
+drone_spawn_xy = zeros(num_items, 2);
+idx = 0;
+for row = 1:grid_rows
+    for col = 1:grid_cols
+        idx = idx + 1;
+        if idx > num_items
+            break;
+        end
+        drone_spawn_xy(idx, :) = [center_xy(1) + x_offsets(col), center_xy(2) + y_offsets(row)];
+    end
+end
+
+pad_spawn_xy = autlRotatePointsAroundCenter(drone_spawn_xy, center_xy, 45.0);
+end
+
+function [grid_cols, grid_rows] = autlComputeFormationGridShape(num_items, layout_mode)
+% Choose a centered grid that is square-ish by default and rectangular when requested.
+
+if nargin < 1 || isempty(num_items)
+    num_items = 1;
+end
+if nargin < 2 || isempty(layout_mode)
+    layout_mode = 'auto';
+end
+
+layout_mode = lower(string(layout_mode));
+switch layout_mode
+    case 'rectangle'
+        grid_cols = max(1, ceil(sqrt(num_items * 1.5)));
+        grid_rows = ceil(num_items / grid_cols);
+    otherwise
+        grid_cols = max(1, ceil(sqrt(num_items)));
+        grid_rows = ceil(num_items / grid_cols);
+end
+end
+
+function rotated_xy = autlRotatePointsAroundCenter(points_xy, center_xy, rotation_deg)
+% Rotate a set of XY points around a shared center.
+
+if isempty(points_xy)
+    rotated_xy = points_xy;
+    return;
+end
+
+rotation_rad = deg2rad(rotation_deg);
+rotation_mat = [cos(rotation_rad), -sin(rotation_rad); sin(rotation_rad), cos(rotation_rad)];
+center_xy_row = double(center_xy(:).');
+shifted_xy = double(points_xy) - center_xy_row;
+rotated_xy = shifted_xy * rotation_mat.' + center_xy_row;
 end
 
 function autlLaunchRvizMonitor(rootDir, ros_domain_id, num_workers)
@@ -839,6 +971,35 @@ launch_script = fullfile(rootDir, 'scripts', 'launch_rviz_monitor.sh');
 if ~isfile(launch_script)
     fprintf('[Pipeline] WARNING: RViz launcher not found: %s\n', launch_script);
     return;
+end
+
+function autlLaunchMavrosBridge(rootDir, ros_domain_id, num_workers, namespace_prefix)
+% Launch worker-specific MAVROS nodes in the background.
+
+launch_script = fullfile(rootDir, 'scripts', 'launch_multi_mavros.sh');
+if ~isfile(launch_script)
+    fprintf('[Pipeline] WARNING: MAVROS launcher not found: %s\n', launch_script);
+    return;
+end
+
+if nargin < 2 || strlength(string(ros_domain_id)) == 0
+    ros_domain_id = 'auto';
+end
+if nargin < 3 || isempty(num_workers)
+    num_workers = 1;
+end
+if nargin < 4 || strlength(string(namespace_prefix)) == 0
+    namespace_prefix = '/mavros_w';
+end
+
+cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d --namespace-prefix "%s" > /tmp/autolanding_mavros_launcher.log 2>&1 &''', ...
+    launch_script, char(string(ros_domain_id)), num_workers, char(string(namespace_prefix)));
+[rc, ~] = system(cmd);
+if rc == 0
+    fprintf('[Pipeline] MAVROS bridge launch requested (log: /tmp/autolanding_mavros_launcher.log)\n');
+else
+    fprintf('[Pipeline] WARNING: Failed to launch MAVROS bridge (rc=%d)\n', rc);
+end
 end
 
 if nargin < 2 || strlength(string(ros_domain_id)) == 0
@@ -898,7 +1059,7 @@ if actual_count ~= expected_workers
 end
 end
 
-function [all_ready, report_text] = autlVerifyMavlinkHeartbeatReady(num_workers, multi_drone_enabled)
+function [all_ready, report_text] = autlVerifyMavlinkHeartbeatReady(num_workers, multi_drone_enabled, deadline_s, poll_s)
 % Verify heartbeat availability on expected MAVLink endpoints before data collection.
 
 if nargin < 1 || isempty(num_workers)
@@ -907,6 +1068,12 @@ end
 if nargin < 2
     multi_drone_enabled = false;
 end
+if nargin < 3 || isempty(deadline_s)
+    deadline_s = 35.0;
+end
+if nargin < 4 || isempty(poll_s)
+    poll_s = 1.5;
+end
 
 if multi_drone_enabled
     target_workers = 1:max(1, round(num_workers));
@@ -914,59 +1081,267 @@ else
     target_workers = 1;
 end
 
-deadline_s = 35.0;
-poll_s = 1.5;
 all_ready = true;
 line_buf = strings(0, 1);
 line_buf(end+1) = "[Pipeline] MAVLink readiness check (heartbeat)...";
+ready_flags = false(size(target_workers));
+tcp_open_flags = false(size(target_workers));
+last_errors = strings(size(target_workers));
+progress_last_t = -inf;
+progress_interval_s = 5.0;
+probe_timeout_s = 0.8;
+tcp_fallback_grace_s = 12.0;
 
-for worker_id = target_workers
-    serial1_conn = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (worker_id - 1));
-    serial0_conn = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (worker_id - 1));
+start_t = tic;
+while toc(start_t) < deadline_s && ~all(ready_flags)
+    drawnow limitrate;
+    for idx = 1:numel(target_workers)
+        if ready_flags(idx)
+            continue;
+        end
 
-    cfg = struct('mav', struct('master_connection', serial1_conn, 'allow_port_fallback', false));
-    start_t = tic;
-    ok = false;
-    last_err = "no_response";
+        worker_id = target_workers(idx);
+        serial1_conn = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (worker_id - 1));
+        serial0_conn = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (worker_id - 1));
 
-    while toc(start_t) < deadline_s
+        cfg = struct('mav', struct('master_connection', serial1_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
         res = autlMavproxyControl('status', struct(), cfg);
         if res.is_success
-            ok = true;
-            break;
+            ready_flags(idx) = true;
+            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial1=%s, serial0=%s)', ...
+                worker_id, serial1_conn, serial0_conn);
+            continue;
         end
 
-        fb_cfg = struct('mav', struct('master_connection', serial0_conn, 'allow_port_fallback', false));
+        fb_cfg = struct('mav', struct('master_connection', serial0_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
         fb_res = autlMavproxyControl('status', struct(), fb_cfg);
         if fb_res.is_success
-            ok = true;
-            break;
+            ready_flags(idx) = true;
+            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial1=%s, serial0=%s)', ...
+                worker_id, serial1_conn, serial0_conn);
+        else
+            last_err = string(res.error_message);
+            if strlength(string(fb_res.error_message)) > 0
+                last_err = last_err + " | fallback:" + string(fb_res.error_message);
+            end
+            last_errors(idx) = last_err;
         end
 
-        last_err = string(res.error_message);
-        if strlength(string(fb_res.error_message)) > 0
-            last_err = last_err + " | fallback:" + string(fb_res.error_message);
-        end
-        pause(poll_s);
+        drawnow limitrate;
     end
 
-    if ok
-        line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial1=%s, serial0=%s)', ...
-            worker_id, serial1_conn, serial0_conn);
-    else
+    elapsed_s = toc(start_t);
+
+    % Early fallback: if heartbeat is still delayed but all worker MAVLink TCP ports are open,
+    % proceed after a short grace period instead of waiting for full timeout budget.
+    if elapsed_s >= tcp_fallback_grace_s && ~all(ready_flags)
+        open_now = true;
+        for k = 1:numel(target_workers)
+            if ready_flags(k)
+                continue;
+            end
+            worker_id = target_workers(k);
+            serial1_port = 5762 + 10 * (worker_id - 1);
+            serial0_port = 5760 + 10 * (worker_id - 1);
+            if ~(autlCanOpenLocalTcp(serial1_port, 0.25) || autlCanOpenLocalTcp(serial0_port, 0.25))
+                open_now = false;
+                break;
+            end
+        end
+
+        if open_now
+            line_buf(end+1) = sprintf('[Pipeline]   Heartbeat not yet observed by %.1fs, but all MAVLink TCP endpoints are reachable.', elapsed_s);
+            line_buf(end+1) = "[Pipeline] WARNING: Using early TCP fallback to continue startup.";
+            line_buf(end+1) = "[Pipeline] MAVLink readiness check: PASS (TCP fallback)";
+            report_text = sprintf('%s\n', line_buf{:});
+            all_ready = true;
+            return;
+        end
+    end
+
+    if (elapsed_s - progress_last_t) >= progress_interval_s
+        progress_last_t = elapsed_s;
+        status_parts = strings(1, numel(target_workers));
+        for k = 1:numel(target_workers)
+            worker_id = target_workers(k);
+            if ready_flags(k)
+                status_parts(k) = sprintf('W%d=READY', worker_id);
+            else
+                status_parts(k) = sprintf('W%d=WAIT', worker_id);
+            end
+        end
+        fprintf('[Pipeline] MAVLink wait %.1fs/%.1fs [%s]\n', elapsed_s, deadline_s, strjoin(status_parts, ', '));
+    end
+
+    if ~all(ready_flags)
+        pause(poll_s);
+    end
+end
+
+for idx = 1:numel(target_workers)
+    if ~ready_flags(idx)
         all_ready = false;
+        worker_id = target_workers(idx);
+        serial1_port = 5762 + 10 * (worker_id - 1);
+        serial0_port = 5760 + 10 * (worker_id - 1);
+        serial1_conn = sprintf('tcp:127.0.0.1:%d', serial1_port);
+        serial0_conn = sprintf('tcp:127.0.0.1:%d', serial0_port);
+
+        serial1_open = autlCanOpenLocalTcp(serial1_port, 0.35);
+        serial0_open = autlCanOpenLocalTcp(serial0_port, 0.35);
+        tcp_open_flags(idx) = serial1_open || serial0_open;
+
         line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint NOT READY after %.1fs', worker_id, deadline_s);
-        line_buf(end+1) = sprintf('[Pipeline]     Last error: %s', char(last_err));
+        if strlength(last_errors(idx)) > 0
+            line_buf(end+1) = sprintf('[Pipeline]     Last error: %s', char(last_errors(idx)));
+        end
+        if tcp_open_flags(idx)
+            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: OPEN (serial1=%s, serial0=%s)', serial1_conn, serial0_conn);
+        else
+            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: CLOSED (serial1=%s, serial0=%s)', serial1_conn, serial0_conn);
+        end
     end
 end
 
 if all_ready
     line_buf(end+1) = "[Pipeline] MAVLink readiness check: PASS";
+elseif all(tcp_open_flags)
+    % Some environments delay/omit heartbeat at startup while endpoints are already reachable.
+    % Allow pipeline to continue; worker-level control still performs per-call readiness checks.
+    all_ready = true;
+    line_buf(end+1) = "[Pipeline] WARNING: Heartbeat not observed, but MAVLink TCP endpoints are open for all workers.";
+    line_buf(end+1) = "[Pipeline] MAVLink readiness check: PASS (TCP fallback)";
 else
     line_buf(end+1) = "[Pipeline] MAVLink readiness check: FAIL";
 end
 
 report_text = sprintf('%s\n', line_buf{:});
+end
+
+function is_open = autlCanOpenLocalTcp(port, timeout_s)
+% Return true when a local TCP endpoint accepts a connection.
+
+if nargin < 2 || isempty(timeout_s)
+    timeout_s = 0.35;
+end
+
+cmd = sprintf([ ...
+    'bash -lc ''timeout %.2f bash -lc "exec 3<>/dev/tcp/127.0.0.1/%d; ' ...
+    'exec 3<&-; exec 3>&-" >/dev/null 2>&1'''], max(0.1, double(timeout_s)), round(double(port)));
+is_open = (system(cmd) == 0);
+end
+
+function [all_ready, report_text] = autlWaitForSitlJsonReady(num_workers, multi_drone_enabled, timeout_s)
+% Wait until each required SITL instance reports JSON sensor data reception.
+
+if nargin < 1 || isempty(num_workers)
+    num_workers = 1;
+end
+if nargin < 2
+    multi_drone_enabled = false;
+end
+if nargin < 3 || isempty(timeout_s)
+    timeout_s = 30.0;
+end
+
+if multi_drone_enabled
+    target_instances = 0:(max(1, round(num_workers)) - 1);
+else
+    target_instances = 0;
+end
+
+poll_s = 1.0;
+start_t = tic;
+line_buf = strings(0, 1);
+line_buf(end+1) = "[Pipeline] SITL JSON bridge readiness check...";
+ready_flags = false(size(target_instances));
+bootstrap_last_t = -inf(size(target_instances));
+bootstrap_retry_s = 2.0;
+progress_last_t = -inf;
+progress_interval_s = 5.0;
+
+while toc(start_t) < timeout_s
+    drawnow limitrate;
+    for idx = 1:numel(target_instances)
+        if ready_flags(idx)
+            continue;
+        end
+        instance_id = target_instances(idx);
+        log_file = sprintf('/tmp/autolanding_sitl/arducopter_I%d.log', instance_id);
+
+        elapsed_s = toc(start_t);
+        if (elapsed_s - bootstrap_last_t(idx)) >= bootstrap_retry_s
+            autlNudgeSitlSerial0(instance_id);
+            bootstrap_last_t(idx) = elapsed_s;
+        end
+
+        if ~isfile(log_file)
+            continue;
+        end
+        try
+            txt = fileread(log_file);
+            ready_flags(idx) = contains(txt, 'JSON received:');
+        catch
+            % Ignore transient file access errors and retry.
+        end
+
+        drawnow limitrate;
+    end
+
+    elapsed_s = toc(start_t);
+    if (elapsed_s - progress_last_t) >= progress_interval_s
+        progress_last_t = elapsed_s;
+        status_parts = strings(1, numel(target_instances));
+        for k = 1:numel(target_instances)
+            instance_id = target_instances(k);
+            if ready_flags(k)
+                status_parts(k) = sprintf('I%d=READY', instance_id);
+            else
+                status_parts(k) = sprintf('I%d=WAIT', instance_id);
+            end
+        end
+        fprintf('[Pipeline] SITL JSON wait %.1fs/%.1fs [%s]\n', elapsed_s, timeout_s, strjoin(status_parts, ', '));
+    end
+
+    if all(ready_flags)
+        break;
+    end
+    pause(poll_s);
+end
+
+all_ready = all(ready_flags);
+for idx = 1:numel(target_instances)
+    instance_id = target_instances(idx);
+    log_file = sprintf('/tmp/autolanding_sitl/arducopter_I%d.log', instance_id);
+    if ready_flags(idx)
+        line_buf(end+1) = sprintf('[Pipeline]   I%d JSON READY (%s)', instance_id, log_file);
+    else
+        line_buf(end+1) = sprintf('[Pipeline]   I%d JSON NOT READY after %.1fs (%s)', ...
+            instance_id, timeout_s, log_file);
+    end
+end
+
+if all_ready
+    line_buf(end+1) = "[Pipeline] SITL JSON bridge readiness check: PASS";
+else
+    line_buf(end+1) = "[Pipeline] SITL JSON bridge readiness check: FAIL";
+end
+
+report_text = sprintf('%s\n', line_buf{:});
+end
+
+function autlNudgeSitlSerial0(instance_id)
+% Open and close SERIAL0 TCP quickly so SITL exits "Waiting for connection ....".
+
+if nargin < 1 || isempty(instance_id)
+    return;
+end
+
+serial0_port = 5760 + 10 * instance_id;
+cmd = sprintf([ ...
+    'bash -lc ''timeout 0.4 bash -lc "exec 3<>/dev/tcp/127.0.0.1/%d; ' ...
+    'sleep 0.05; exec 3<&-; exec 3>&-" >/dev/null 2>&1 || true'''], serial0_port);
+system(cmd);
 end
 
 function autlMainCleanup()
@@ -979,6 +1354,11 @@ try
     system('pkill -f "gz sim" 2>/dev/null');
     system('pkill -f "arducopter" 2>/dev/null');
     system('pkill -f "mavproxy.py" 2>/dev/null');
+    system('pkill -f "rviz2" 2>/dev/null');
+    system('pkill -f "ros_gz_bridge parameter_bridge" 2>/dev/null');
+    system('pkill -f "ros2_aruco" 2>/dev/null');
+    system('pkill -f "publish_multi_drone_odom.py" 2>/dev/null');
+    system('pkill -f "mavros_node" 2>/dev/null');
     
     % Delete parallel pool if exists
     pool = gcp('nocreate');

@@ -82,6 +82,7 @@ ros2 topic echo /aruco_markers
 3. Marker size follows `drone_size * (2^2)` (default `0.5 * 4 = 2.0 m`).
 4. Collection publishes pad spec to `/autolanding/landing_pad` and stores `landing_pad_spec.json`.
 5. Hover-to-land trajectory is generated to `data/processed/landing_trajectory_aruco_hover.csv`.
+6. Data collection now holds hover and delays motion commands until `/aruco_markers` reports at least one visible marker.
 
 ## 4. Run in MATLAB
 
