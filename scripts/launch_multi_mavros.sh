@@ -79,16 +79,17 @@ touch /tmp/autolanding_mavros_nodes.txt
 : > /tmp/autolanding_mavros_nodes.txt
 
 for ((i=1; i<=WORKER_COUNT; i++)); do
-  serial1_port=$((BASE_SERIAL1_PORT + 10 * (i - 1)))
-  fcu_url="tcp://127.0.0.1:${serial1_port}"
+  serial0_port=$((BASE_SERIAL1_PORT - 2 + 10 * (i - 1)))
+  serial1_port=$((serial0_port + 2))
+  fcu_url="tcp://127.0.0.1:${serial0_port}@${serial1_port}"
   ns="${NS_PREFIX}${i}"
   log_file="/tmp/autolanding_mavros_w${i}.log"
 
   echo "[INFO] launching MAVROS worker ${i}: ns=${ns}, fcu_url=${fcu_url}"
-  nohup ros2 run mavros mavros_node --ros-args \
+  nohup setsid ros2 run mavros mavros_node --ros-args \
     -r __ns:="${ns}" \
     -p fcu_url:="${fcu_url}" \
-    > "${log_file}" 2>&1 &
+    > "${log_file}" 2>&1 < /dev/null &
 
   echo "${i},${ns},${fcu_url},${log_file}" >> /tmp/autolanding_mavros_nodes.txt
   sleep 0.4

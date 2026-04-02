@@ -24,7 +24,7 @@ start_instance() {
     --defaults "$ARDUPILOT_DIR/Tools/autotest/default_params/copter.parm,$ARDUPILOT_DIR/Tools/autotest/default_params/gazebo-iris.parm" \
     --sim-address="$sim_addr" -I"$i")
 
-  nohup "${cmd[@]}" > "$log_file" 2>&1 &
+  nohup setsid "${cmd[@]}" > "$log_file" 2>&1 < /dev/null &
   echo "[INFO] I${i} started (sim_addr=${sim_addr}, master tcp:127.0.0.1:$((5760 + 10*i)), serial1 tcp:127.0.0.1:$((5762 + 10*i))) log=$log_file"
 }
 

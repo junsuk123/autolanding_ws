@@ -923,6 +923,9 @@ bash scripts/launch_multi_drone_sitl.sh 3
 # Terminal 3: RViz + bridge + aruco detector (default domain 0)
 bash scripts/launch_rviz_monitor.sh --domain 0
 
+# Stop a running RViz monitor before relaunching it
+bash scripts/launch_rviz_monitor.sh --stop
+
 # Terminal 4: MATLAB full pipeline
 bash scripts/run_pipeline_matlab.sh
 ```
@@ -931,7 +934,7 @@ Notes:
 
 - `scripts/launch_rviz_monitor.sh` sources local overlays if present (`/opt/ros/humble`, `~/gz_ros2_aruco_ws`, `~/SynologyDrive/INCSL/devel/INCSL/IICC26_ws`) and exports `ROS_DOMAIN_ID=0` by default.
 - `AutoLandingMainFull` now builds worker-specific profiles (`worker_profiles`) with different MAVLink ports, spawn offsets, and motion profiles (`aggressive`, `conservative`, `orbit-heavy`, `balanced`).
-- Worker MAVLink mapping follows ArduPilot instance offsets: worker `i` uses `tcp:127.0.0.1:(5762 + 10*(i-1))` with fallback `5760 + 10*(i-1)`.
+- Worker MAVLink mapping follows ArduPilot instance offsets: worker `i` uses `tcp:127.0.0.1:(5760 + 10*(i-1))` with fallback `5762 + 10*(i-1)`.
 - RViz monitor launches a MAVLink-to-ROS odometry publisher and exposes namespaced topics: `/drone1/odom`, `/drone2/odom`, ...
 - World generation is now multi-drone aware: generated world includes one iris model per worker using profile-based spawn/yaw/model-name values.
 - RViz preset includes per-drone color odometry, path trails (`/droneN/path`), and per-drone camera image displays (`/droneN/camera`).

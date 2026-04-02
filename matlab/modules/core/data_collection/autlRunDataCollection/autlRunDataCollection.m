@@ -99,6 +99,9 @@ end
 if ~isfield(mission_config, 'mavlink_precheck_timeout_s')
     mission_config.mavlink_precheck_timeout_s = 12.0;
 end
+if ~isfield(mission_config, 'mavlink_control_timeout_s') || isempty(mission_config.mavlink_control_timeout_s)
+    mission_config.mavlink_control_timeout_s = mission_config.mavlink_precheck_timeout_s;
+end
 if ~isfield(mission_config, 'control_backend')
     mission_config.control_backend = 'mavproxy';
 end
@@ -124,10 +127,10 @@ if ~isfield(mission_config, 'aruco_visibility_min_markers')
     mission_config.aruco_visibility_min_markers = 1;
 end
 if ~isfield(mission_config, 'mavlink_master')
-    mission_config.mavlink_master = 'tcp:127.0.0.1:5762';
+    mission_config.mavlink_master = 'tcp:127.0.0.1:5760';
 end
 if ~isfield(mission_config, 'mavlink_master_fallback')
-    mission_config.mavlink_master_fallback = 'tcp:127.0.0.1:5760';
+    mission_config.mavlink_master_fallback = 'tcp:127.0.0.1:5762';
 end
 if ~isfield(mission_config, 'motion_profile')
     mission_config.motion_profile = 'balanced';
@@ -319,7 +322,8 @@ try
         'fallback_master', mission_config.mavlink_master_fallback, ...
         'allow_simulated_fallback', mission_config.allow_simulated_fallback, ...
         'query_interval_s', mission_config.telemetry_query_interval_s);
-    control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master, 'allow_port_fallback', true));
+    control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master, ...
+        'allow_port_fallback', true, 'timeout_s', mission_config.mavlink_control_timeout_s));
     control_cfg.control = struct('backend', mission_config.control_backend, ...
         'allow_backend_fallback', logical(mission_config.control_backend_fallback), ...
         'mavros_namespace', mission_config.mavros_namespace);

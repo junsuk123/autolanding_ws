@@ -148,10 +148,13 @@ try
             mission_cfg.reset_ardupilot_each_scenario = config.reset_ardupilot_each_scenario;
         end
         if ~isfield(mission_cfg, 'mavlink_master')
-            mission_cfg.mavlink_master = 'tcp:127.0.0.1:5762';
+            mission_cfg.mavlink_master = 'tcp:127.0.0.1:5760';
+        end
+        if ~isfield(mission_cfg, 'mavlink_control_timeout_s')
+            mission_cfg.mavlink_control_timeout_s = 30.0;
         end
         if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1
-            if strcmp(char(string(mission_cfg.mavlink_master)), 'tcp:127.0.0.1:5762')
+            if strcmp(char(string(mission_cfg.mavlink_master)), 'tcp:127.0.0.1:5760')
                 mission_cfg.enable_auto_motion = false;
                 fprintf(log_fid, '[Worker %d] Auto motion disabled: shared MAVLink master (%s).\n', worker_id, char(string(mission_cfg.mavlink_master)));
             else
@@ -472,7 +475,7 @@ if isfield(mission_cfg, 'mavlink_ready_poll_interval_s')
     poll_interval_s = max(0.3, double(mission_cfg.mavlink_ready_poll_interval_s));
 end
 
-ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+ctrl_cfg = struct('mav', struct('master_connection', master_conn, 'timeout_s', mission_cfg.mavlink_control_timeout_s));
 ctrl_cfg.control = struct('backend', 'mavproxy', 'allow_backend_fallback', true, 'mavros_namespace', '/mavros');
 if isfield(mission_cfg, 'control_backend')
     ctrl_cfg.control.backend = char(string(mission_cfg.control_backend));
@@ -559,7 +562,7 @@ if isfield(mission_cfg, 'reset_mode_sequence') && ~isempty(mission_cfg.reset_mod
     end
 end
 
-ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+ctrl_cfg = struct('mav', struct('master_connection', master_conn, 'timeout_s', mission_cfg.mavlink_control_timeout_s));
 ctrl_cfg.control = struct('backend', 'mavproxy', 'allow_backend_fallback', true, 'mavros_namespace', '/mavros');
 if isfield(mission_cfg, 'control_backend')
     ctrl_cfg.control.backend = char(string(mission_cfg.control_backend));

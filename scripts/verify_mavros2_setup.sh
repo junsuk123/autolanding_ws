@@ -43,7 +43,7 @@ if [[ "$MISSING" -ne 0 ]]; then
 fi
 
 echo "[check] MAVROS launch files"
-if ros2 launch mavros px4.launch fcu_url:=tcp://127.0.0.1:5762@5760 >/tmp/mavros_verify_launch.log 2>&1 & then
+if ros2 launch mavros px4.launch fcu_url:=tcp://127.0.0.1:5760@5762 >/tmp/mavros_verify_launch.log 2>&1 & then
   PID=$!
   sleep 4
   if ps -p "$PID" >/dev/null 2>&1; then

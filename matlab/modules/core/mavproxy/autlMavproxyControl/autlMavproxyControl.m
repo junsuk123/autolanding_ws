@@ -22,8 +22,8 @@ function result = autlMavproxyControl(action, params, cfg)
     
     % Default MAVProxy connection
     if ~isfield(cfg, 'mav') || ~isfield(cfg.mav, 'master_connection')
-        % Use SERIAL1 to avoid churning the primary SERIAL0 link.
-        master_conn = 'tcp:127.0.0.1:5762';
+        % Use the SITL master endpoint (SERIAL0) by default.
+        master_conn = 'tcp:127.0.0.1:5760';
     else
         master_conn = cfg.mav.master_connection;
     end
@@ -31,7 +31,7 @@ function result = autlMavproxyControl(action, params, cfg)
     % Timeout for control operation (seconds)
     timeout = 4;
     if isfield(cfg, 'mav') && isfield(cfg.mav, 'timeout_s') && ~isempty(cfg.mav.timeout_s)
-        timeout = max(0.5, min(10.0, double(cfg.mav.timeout_s)));
+        timeout = max(0.5, min(30.0, double(cfg.mav.timeout_s)));
     end
 
     flow_log_file = '';
@@ -109,10 +109,10 @@ function result = autlMavproxyControl(action, params, cfg)
 
     master_candidates = {master_conn};
     if allow_port_fallback
-        if contains(master_conn, ':5762')
-            master_candidates{end+1} = strrep(master_conn, ':5762', ':5760');
-        elseif contains(master_conn, ':5760')
+        if contains(master_conn, ':5760')
             master_candidates{end+1} = strrep(master_conn, ':5760', ':5762');
+        elseif contains(master_conn, ':5762')
+            master_candidates{end+1} = strrep(master_conn, ':5762', ':5760');
         end
         master_candidates = unique(master_candidates, 'stable');
     end

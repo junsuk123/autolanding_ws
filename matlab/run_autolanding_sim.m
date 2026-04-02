@@ -9,7 +9,7 @@
 % Prerequisites:
 %   - Gazebo simulator with iris_runway.sdf
 %   - ArduPilot SITL with gazebo-iris model
-%   - MAVLink connectivity at tcp:127.0.0.1:5762
+%   - MAVLink connectivity at tcp:127.0.0.1:5760
 
 clear all; close all; clc;
 
@@ -40,7 +40,7 @@ end
 fprintf('\n[DIAGNOSTICS] Checking simulation connectivity...\n');
 try
     % Try to get vehicle status via MAVProxy
-    [status, output] = system('timeout 5 mavproxy.py --master tcp:127.0.0.1:5762 --cmd="status" 2>&1');
+    [status, output] = system('timeout 5 mavproxy.py --master tcp:127.0.0.1:5760 --cmd="status" 2>&1');
     if status == 0
         if contains(output, 'Detected vehicle', 'IgnoreCase', true)
             fprintf('[OK] Vehicle heartbeat detected\n');

@@ -209,11 +209,11 @@ function AutoLandingMainFull(varargin)
         
         if gazebo_server_mode
             fprintf('[Pipeline] Starting Gazebo (server mode)...\n');
-            gz_cmd = sprintf('bash -lc ''%s export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; cd "%s" && gz sim -s -v4 -r "%s" > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
+            gz_cmd = sprintf('bash -lc ''%s export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; cd "%s" && setsid gz sim -s -v4 -r "%s" </dev/null > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
         else
             fprintf('[Pipeline] Starting Gazebo (GUI mode)...\n');
             fprintf('[Pipeline] Display: %s\n', display_env);
-            gz_cmd = sprintf('bash -lc ''%s export DISPLAY="%s"; %s export QT_QPA_PLATFORM=xcb; export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; xhost +local: 2>/dev/null || true; cd "%s" && gz sim -v4 -r "%s" > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, display_env, xauth_export, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
+            gz_cmd = sprintf('bash -lc ''%s export DISPLAY="%s"; %s export QT_QPA_PLATFORM=xcb; export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; xhost +local: 2>/dev/null || true; cd "%s" && setsid gz sim -v4 -r "%s" </dev/null > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, display_env, xauth_export, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
             fprintf('[Pipeline] Launch command: cd %s && gz sim -v4 -r %s\n', launch_world_dir, launch_world_name);
         end
         system(gz_cmd);
@@ -255,13 +255,13 @@ function AutoLandingMainFull(varargin)
         if enable_multi_drone_profiles
             launch_multi_sitl = fullfile(rootDir, 'scripts', 'launch_multi_drone_sitl.sh');
             if isfile(launch_multi_sitl)
-                ap_cmd = sprintf('bash -lc ''"%s" %d > /tmp/autolanding_multi_sitl.log 2>&1''', launch_multi_sitl, num_workers);
+                ap_cmd = sprintf('bash -lc ''setsid "%s" %d </dev/null > /tmp/autolanding_multi_sitl.log 2>&1 &''', launch_multi_sitl, num_workers);
             else
                 warning('Multi-drone SITL launcher not found: %s. Falling back to single instance.', launch_multi_sitl);
-                ap_cmd = sprintf('nohup $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 > /tmp/ardupilot_sitl.log 2>&1 &');
+                ap_cmd = sprintf('nohup setsid $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 </dev/null > /tmp/ardupilot_sitl.log 2>&1 &');
             end
         else
-            ap_cmd = sprintf('nohup $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 > /tmp/ardupilot_sitl.log 2>&1 &');
+            ap_cmd = sprintf('nohup setsid $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 </dev/null > /tmp/ardupilot_sitl.log 2>&1 &');
         end
         system(ap_cmd);
         pause(5);
@@ -350,6 +350,7 @@ function AutoLandingMainFull(varargin)
         mission_overrides.telemetry_query_interval_s = 2.0;
         mission_overrides.control_interval_s = 2.0;
         mission_overrides.mavlink_precheck_timeout_s = 30.0;
+        mission_overrides.mavlink_control_timeout_s = 30.0;
         mission_overrides.mavlink_ready_timeout_s = 10.0;
         mission_overrides.mavlink_ready_poll_interval_s = 0.8;
         mission_overrides.reset_pose_each_scenario = true;
@@ -824,6 +825,9 @@ gazebo_pkg_dir = fileparts(fileparts(base_world_path));
 template_model_dir = fullfile(gazebo_pkg_dir, 'models', 'iris_with_gimbal');
 template_sdf = fullfile(template_model_dir, 'model.sdf');
 template_cfg = fullfile(template_model_dir, 'model.config');
+gimbal_template_dir = fullfile(gazebo_pkg_dir, 'models', 'gimbal_small_3d');
+gimbal_template_sdf = fullfile(gimbal_template_dir, 'model.sdf');
+gimbal_template_cfg = fullfile(gimbal_template_dir, 'model.config');
 
 if ~isfile(template_sdf)
     error('Template iris model not found: %s', template_sdf);
@@ -835,8 +839,42 @@ if ~isfolder(variant_dir)
     mkdir(variant_dir);
 end
 
+gimbal_variant_name = sprintf('gimbal_small_3d_w%d', drone_index);
+gimbal_variant_dir = fullfile('/tmp', gimbal_variant_name);
+if ~isfolder(gimbal_variant_dir)
+    mkdir(gimbal_variant_dir);
+end
+
+if isfile(gimbal_template_sdf)
+    gimbal_sdf_text = fileread(gimbal_template_sdf);
+    gimbal_sdf_text = strrep(gimbal_sdf_text, '<model name="gimbal_small_3d">', sprintf('<model name="%s">', gimbal_variant_name));
+    gimbal_udp_port = 5600 + 10 * (drone_index - 1);
+    gimbal_sdf_text = regexprep(gimbal_sdf_text, '<udp_port>\s*5600\s*</udp_port>', sprintf('<udp_port>%d</udp_port>', gimbal_udp_port), 'once');
+
+    fid = fopen(fullfile(gimbal_variant_dir, 'model.sdf'), 'w');
+    if fid < 0
+        error('Failed to write gimbal model variant sdf: %s', fullfile(gimbal_variant_dir, 'model.sdf'));
+    end
+    fprintf(fid, '%s', gimbal_sdf_text);
+    fclose(fid);
+
+    if isfile(gimbal_template_cfg)
+        gimbal_cfg_text = fileread(gimbal_template_cfg);
+        gimbal_cfg_text = regexprep(gimbal_cfg_text, '<name>\s*[^<]+\s*</name>', sprintf('<name>%s</name>', gimbal_variant_name), 'once');
+        fid = fopen(fullfile(gimbal_variant_dir, 'model.config'), 'w');
+        if fid < 0
+            error('Failed to write gimbal model variant config: %s', fullfile(gimbal_variant_dir, 'model.config'));
+        end
+        fprintf(fid, '%s', gimbal_cfg_text);
+        fclose(fid);
+    end
+else
+    error('Gimbal template not found: %s', gimbal_template_sdf);
+end
+
 sdf_text = fileread(template_sdf);
 sdf_text = strrep(sdf_text, '<model name="iris_with_gimbal">', sprintf('<model name="%s">', variant_name));
+sdf_text = strrep(sdf_text, 'model://gimbal_small_3d', sprintf('model://%s', gimbal_variant_name));
 
 % Update only FDM ports. Keep nested model/link/joint scoped names intact to avoid
 % breaking SDF frame graph resolution for included models.
@@ -902,8 +940,8 @@ for i = 1:num_workers
     yaw_i = rad2deg(atan2(pad_xy_i(2) - spawn_xy_i(2), pad_xy_i(1) - spawn_xy_i(1)));
 
     profiles(i).worker_state_tag = sprintf('drone_%d_%s', i, state_cycle{mod(i-1, numel(state_cycle)) + 1});
-    profiles(i).mavlink_master = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (i - 1));
-    profiles(i).mavlink_master_fallback = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (i - 1));
+    profiles(i).mavlink_master = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (i - 1));
+    profiles(i).mavlink_master_fallback = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (i - 1));
     profiles(i).mavros_namespace = sprintf('/mavros_w%d', i);
     if i == 1
         profiles(i).reset_model_name = 'iris_with_gimbal';
@@ -1047,6 +1085,9 @@ if nargin < 3 || isempty(num_workers)
     num_workers = 1;
 end
 
+stop_cmd = sprintf('bash -lc ''bash "%s" --stop >/tmp/autolanding_rviz_stop.log 2>&1 || true''', launch_script);
+system(stop_cmd);
+
 cmd = sprintf('bash -lc ''nohup bash "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
     launch_script, char(string(ros_domain_id)), num_workers);
 [rc, ~] = system(cmd);
@@ -1168,24 +1209,24 @@ while toc(start_t) < deadline_s && ~all(ready_flags)
         end
 
         worker_id = target_workers(idx);
-        serial1_conn = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (worker_id - 1));
         serial0_conn = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (worker_id - 1));
+        serial1_conn = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (worker_id - 1));
 
-        cfg = struct('mav', struct('master_connection', serial1_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
+        cfg = struct('mav', struct('master_connection', serial0_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
         res = autlMavproxyControl('status', struct(), cfg);
         if res.is_success
             ready_flags(idx) = true;
-            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial1=%s, serial0=%s)', ...
-                worker_id, serial1_conn, serial0_conn);
+            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial0=%s, serial1=%s)', ...
+                worker_id, serial0_conn, serial1_conn);
             continue;
         end
 
-        fb_cfg = struct('mav', struct('master_connection', serial0_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
+        fb_cfg = struct('mav', struct('master_connection', serial1_conn, 'allow_port_fallback', false, 'timeout_s', probe_timeout_s));
         fb_res = autlMavproxyControl('status', struct(), fb_cfg);
         if fb_res.is_success
             ready_flags(idx) = true;
-            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial1=%s, serial0=%s)', ...
-                worker_id, serial1_conn, serial0_conn);
+            line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint READY (serial0=%s, serial1=%s)', ...
+                worker_id, serial0_conn, serial1_conn);
         else
             last_err = string(res.error_message);
             if strlength(string(fb_res.error_message)) > 0
@@ -1208,9 +1249,9 @@ while toc(start_t) < deadline_s && ~all(ready_flags)
                 continue;
             end
             worker_id = target_workers(k);
-            serial1_port = 5762 + 10 * (worker_id - 1);
             serial0_port = 5760 + 10 * (worker_id - 1);
-            if ~(autlCanOpenLocalTcp(serial1_port, 0.25) || autlCanOpenLocalTcp(serial0_port, 0.25))
+            serial1_port = 5762 + 10 * (worker_id - 1);
+            if ~(autlCanOpenLocalTcp(serial0_port, 0.25) || autlCanOpenLocalTcp(serial1_port, 0.25))
                 open_now = false;
                 break;
             end
@@ -1249,23 +1290,23 @@ for idx = 1:numel(target_workers)
     if ~ready_flags(idx)
         all_ready = false;
         worker_id = target_workers(idx);
-        serial1_port = 5762 + 10 * (worker_id - 1);
         serial0_port = 5760 + 10 * (worker_id - 1);
-        serial1_conn = sprintf('tcp:127.0.0.1:%d', serial1_port);
+        serial1_port = 5762 + 10 * (worker_id - 1);
         serial0_conn = sprintf('tcp:127.0.0.1:%d', serial0_port);
+        serial1_conn = sprintf('tcp:127.0.0.1:%d', serial1_port);
 
-        serial1_open = autlCanOpenLocalTcp(serial1_port, 0.35);
         serial0_open = autlCanOpenLocalTcp(serial0_port, 0.35);
-        tcp_open_flags(idx) = serial1_open || serial0_open;
+        serial1_open = autlCanOpenLocalTcp(serial1_port, 0.35);
+        tcp_open_flags(idx) = serial0_open || serial1_open;
 
         line_buf(end+1) = sprintf('[Pipeline]   Worker %d endpoint NOT READY after %.1fs', worker_id, deadline_s);
         if strlength(last_errors(idx)) > 0
             line_buf(end+1) = sprintf('[Pipeline]     Last error: %s', char(last_errors(idx)));
         end
         if tcp_open_flags(idx)
-            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: OPEN (serial1=%s, serial0=%s)', serial1_conn, serial0_conn);
+            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: OPEN (serial0=%s, serial1=%s)', serial0_conn, serial1_conn);
         else
-            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: CLOSED (serial1=%s, serial0=%s)', serial1_conn, serial0_conn);
+            line_buf(end+1) = sprintf('[Pipeline]     TCP probe: CLOSED (serial0=%s, serial1=%s)', serial0_conn, serial1_conn);
         end
     end
 end
