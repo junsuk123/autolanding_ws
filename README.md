@@ -373,10 +373,14 @@ AutoLandingMainFull()
 % Simulation Settings
 gazebo_server_mode = true;          % true = Server (headless), false = GUI
 enable_visualization = true;        % true = Real-time plots/monitoring
+ros_domain_id = '0';                % Unified default ROS domain for MATLAB/workers/RViz
 
 % Data Collection Settings
 num_workers = 4;                    % Number of parallel workers
 scenarios_per_worker = 10;          % Scenarios per worker (total = 40)
+drone_spawn_distance_m = 0.8;       % Drone distance from landing pad center
+drone_spawn_angle_deg = 35.0;      % Drone spawn angle around the landing pad
+landing_pad_distance_m = 1.15;     % Landing pad offset distance from each worker drone base spawn
 
 % Train/Validation Split
 total_training_samples = 100;       % Total samples for training
@@ -894,8 +898,8 @@ gz sim -v4 -r iris_runway.sdf
 # Terminal 2: Multi-SITL instances (I0..I2 by default)
 bash scripts/launch_multi_drone_sitl.sh 3
 
-# Terminal 3: RViz + bridge + aruco detector (domain auto-detect; override with --domain 21)
-bash scripts/launch_rviz_monitor.sh --domain auto
+# Terminal 3: RViz + bridge + aruco detector (default domain 0)
+bash scripts/launch_rviz_monitor.sh --domain 0
 
 # Terminal 4: MATLAB full pipeline
 bash scripts/run_pipeline_matlab.sh
@@ -903,7 +907,7 @@ bash scripts/run_pipeline_matlab.sh
 
 Notes:
 
-- `scripts/launch_rviz_monitor.sh` sources local overlays if present (`/opt/ros/humble`, `~/gz_ros2_aruco_ws`, `~/SynologyDrive/INCSL/devel/INCSL/IICC26_ws`) and exports `ROS_DOMAIN_ID` safely.
+- `scripts/launch_rviz_monitor.sh` sources local overlays if present (`/opt/ros/humble`, `~/gz_ros2_aruco_ws`, `~/SynologyDrive/INCSL/devel/INCSL/IICC26_ws`) and exports `ROS_DOMAIN_ID=0` by default.
 - `AutoLandingMainFull` now builds worker-specific profiles (`worker_profiles`) with different MAVLink ports, spawn offsets, and motion profiles (`aggressive`, `conservative`, `orbit-heavy`, `balanced`).
 - Worker MAVLink mapping follows ArduPilot instance offsets: worker `i` uses `tcp:127.0.0.1:(5762 + 10*(i-1))` with fallback `5760 + 10*(i-1)`.
 - RViz monitor launches a MAVLink-to-ROS odometry publisher and exposes namespaced topics: `/drone1/odom`, `/drone2/odom`, ...
@@ -911,7 +915,7 @@ Notes:
 - RViz preset includes per-drone color odometry, path trails (`/droneN/path`), and per-drone camera image displays (`/droneN/camera`).
 - Bridge launcher now starts per-worker camera bridges automatically for `/droneN/camera` topics.
 - Drone spawns are placed on a fixed-spacing grid (`3.0 m`) to prevent overlap during multi-worker runs.
-- ArUco markers are spawned per drone near each spawn point (worker-specific landing pad center), and observer cameras are positioned to face each marker to reduce cross-camera overlap.
+- ArUco markers are spawned per drone near each spawn point using `landing_pad_distance_m`, and observer cameras are positioned to face each marker to reduce cross-camera overlap.
 
 ## 8. Next integration targets
 

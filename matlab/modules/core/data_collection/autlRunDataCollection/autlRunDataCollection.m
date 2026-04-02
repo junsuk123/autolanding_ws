@@ -96,6 +96,9 @@ end
 if ~isfield(mission_config, 'telemetry_query_interval_s')
     mission_config.telemetry_query_interval_s = 5.0;
 end
+if ~isfield(mission_config, 'mavlink_precheck_timeout_s')
+    mission_config.mavlink_precheck_timeout_s = 12.0;
+end
 if ~isfield(mission_config, 'mavlink_master')
     mission_config.mavlink_master = 'tcp:127.0.0.1:5762';
 end
@@ -123,8 +126,50 @@ end
 if ~isfield(mission_config, 'motion_vz_limit_ms')
     mission_config.motion_vz_limit_ms = 0.6;
 end
+if ~isfield(mission_config, 'drone_set_pose_fallback_enabled')
+    mission_config.drone_set_pose_fallback_enabled = true;
+end
+if ~isfield(mission_config, 'drone_set_pose_interval_s')
+    mission_config.drone_set_pose_interval_s = 0.25;
+end
+if ~isfield(mission_config, 'drone_set_pose_radius_m')
+    mission_config.drone_set_pose_radius_m = 0.8;
+end
+if ~isfield(mission_config, 'drone_set_pose_rate_rad_s')
+    mission_config.drone_set_pose_rate_rad_s = 0.45;
+end
+if ~isfield(mission_config, 'drone_set_pose_takeoff_height_m')
+    mission_config.drone_set_pose_takeoff_height_m = mission_config.takeoff_height_m;
+end
+if ~isfield(mission_config, 'drone_set_pose_climb_rate_mps')
+    mission_config.drone_set_pose_climb_rate_mps = 0.6;
+end
+if ~isfield(mission_config, 'drone_set_pose_model_name')
+    if isfield(mission_config, 'reset_model_name') && strlength(string(mission_config.reset_model_name)) > 0
+        mission_config.drone_set_pose_model_name = char(string(mission_config.reset_model_name));
+    else
+        mission_config.drone_set_pose_model_name = 'iris_with_gimbal';
+    end
+end
+if ~isfield(mission_config, 'reset_spawn_z_m')
+    mission_config.reset_spawn_z_m = 0.195;
+end
+if ~isfield(mission_config, 'reset_spawn_xy') || numel(mission_config.reset_spawn_xy) < 2
+    mission_config.reset_spawn_xy = mission_config.landing_pad_center(1:2);
+end
+if ~isfield(mission_config, 'reset_spawn_yaw_deg')
+    mission_config.reset_spawn_yaw_deg = 0.0;
+end
 
 log_prefix = char(string(mission_config.log_prefix));
+flow_log_file = '';
+if isfield(mission_config, 'flow_log_file')
+    flow_log_file = char(string(mission_config.flow_log_file));
+end
+flow_ctx = struct();
+if isfield(mission_config, 'flow_context') && isstruct(mission_config.flow_context)
+    flow_ctx = mission_config.flow_context;
+end
 
 % Create output directory
 if ~exist(mission_config.output_dir, 'dir')
@@ -183,6 +228,9 @@ fprintf('%s[AutoLandingDataCollection] Landing Pad Center: [%.2f, %.2f, %.2f], S
     mission_config.landing_pad_size(1), mission_config.landing_pad_size(2));
 fprintf('%s[AutoLandingDataCollection] Motion Profile: %s (k_xy=%.2f, k_orbit=%.2f, min_move=%.2f)\n', ...
     log_prefix, char(string(mission_config.motion_profile)), mission_config.motion_gain_xy, mission_config.motion_gain_orbit, mission_config.motion_min_move_ms);
+autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_started', autlFlowMerge(flow_ctx, struct( ...
+    'session_id', mission_config.session_id, 'sample_rate', mission_config.sample_rate, ...
+    'max_duration_s', mission_config.max_duration, 'output_dir', sessionDir)));
 
 % Setup real-time visualization if enabled
 fig_handle = [];
@@ -232,21 +280,34 @@ try
         'allow_simulated_fallback', mission_config.allow_simulated_fallback, ...
         'query_interval_s', mission_config.telemetry_query_interval_s);
     control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master));
+    control_cfg.flow_log_file = flow_log_file;
+    control_cfg.flow_context = autlFlowMerge(flow_ctx, struct('module_scope', 'autlRunDataCollection'));
+    control_cfg.flow_log_all_actions = false;
     fprintf('%s[AutoLandingDataCollection] Connecting to vehicle via MAVProxy...\n', log_prefix);
 
     % Publish landing pad spec topic so downstream consumers can subscribe.
     landing_pad_publish_status = autlPublishLandingPadTopic(mission_config, sessionDir, log_prefix);
     landing_pad_runtime = autlInitLandingPadRuntime(mission_config, log_prefix);
+    autlFlowLog(flow_log_file, 'autlRunDataCollection', 'landing_pad_runtime_ready', autlFlowMerge(flow_ctx, struct( ...
+        'publish_ok', logical(landing_pad_publish_status.ok), 'publish_message', char(string(landing_pad_publish_status.message)), ...
+        'follow_enabled', logical(landing_pad_runtime.follow_enabled), 'apply_set_pose', logical(landing_pad_runtime.apply_set_pose))));
 
     % Arm/takeoff once so vehicle actually moves during collection.
     control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
     if mission_config.enable_auto_motion
         if mission_config.require_mavlink_for_auto_motion
-            precheck_res = autlMavproxyControl('status', struct(), control_cfg);
+            [precheck_res, boot_msg] = autlWaitForMavlinkPrecheckTop(mission_config, control_cfg);
+
             if ~precheck_res.is_success
                 mission_config.enable_auto_motion = false;
+                precheck_msg = autlCompactMavErrorTop(precheck_res.error_message);
                 fprintf('%s[AutoLandingDataCollection] Warning: MAVLink precheck failed, auto motion disabled for this run: %s\n', ...
-                    log_prefix, precheck_res.error_message);
+                    log_prefix, precheck_msg);
+                autlFlowLog(flow_log_file, 'autlRunDataCollection', 'mavlink_precheck_failed', autlFlowMerge(flow_ctx, struct( ...
+                    'message', precheck_msg, 'fallback_bootstrap', char(string(boot_msg)))));
+                if exist('boot_msg', 'var') && strlength(string(boot_msg)) > 0 && ~strcmp(string(boot_msg), "not_used")
+                    fprintf('%s[AutoLandingDataCollection] Info: fallback bootstrap result: %s\n', log_prefix, char(string(boot_msg)));
+                end
             end
         end
     end
@@ -256,7 +317,8 @@ try
         fprintf('%s[AutoLandingDataCollection] Auto motion: setting GUIDED mode...\n', log_prefix);
         mode_res = autlMavproxyControl('set_mode', struct('mode', 'GUIDED'), control_cfg);
         if ~mode_res.is_success
-            fprintf('%s[AutoLandingDataCollection] Warning: GUIDED mode set failed: %s\n', log_prefix, mode_res.error_message);
+            fprintf('%s[AutoLandingDataCollection] Warning: GUIDED mode set failed: %s\n', log_prefix, ...
+                autlCompactMavErrorTop(mode_res.error_message));
         else
             fprintf('%s[AutoLandingDataCollection] Auto motion: GUIDED mode set\n', log_prefix);
         end
@@ -265,7 +327,8 @@ try
         arm_res = autlMavproxyControl('arm', struct(), control_cfg);
         control_state.arm_sent = arm_res.is_success;
         if ~arm_res.is_success
-            fprintf('%s[AutoLandingDataCollection] Warning: arm failed: %s\n', log_prefix, arm_res.error_message);
+            fprintf('%s[AutoLandingDataCollection] Warning: arm failed: %s\n', log_prefix, ...
+                autlCompactMavErrorTop(arm_res.error_message));
         else
             fprintf('%s[AutoLandingDataCollection] Auto motion: armed\n', log_prefix);
         end
@@ -275,7 +338,8 @@ try
             takeoff_res = autlMavproxyControl('takeoff', struct('height', mission_config.takeoff_height_m), control_cfg);
             control_state.takeoff_sent = takeoff_res.is_success;
             if ~takeoff_res.is_success
-                fprintf('%s[AutoLandingDataCollection] Warning: takeoff failed: %s\n', log_prefix, takeoff_res.error_message);
+                fprintf('%s[AutoLandingDataCollection] Warning: takeoff failed: %s\n', log_prefix, ...
+                    autlCompactMavErrorTop(takeoff_res.error_message));
             else
                 fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted\n', log_prefix);
                 [hover_ok, hover_msg] = autlWaitForHoverState(mav_config, mission_config.takeoff_height_m, 20.0);
@@ -292,12 +356,15 @@ try
         pause(0.5);
     else
         fprintf('%s[AutoLandingDataCollection] Auto motion control: DISABLED\n', log_prefix);
+        autlFlowLog(flow_log_file, 'autlRunDataCollection', 'auto_motion_disabled', autlFlowMerge(flow_ctx, struct('reason', 'precheck_or_config')));
         control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf);
     end
     
     % Begin collection loop
     sample_idx = 0;
     t_last_sample = tic;
+    elapsed_s = 0;  % Initialize so it's defined even if loop exits early
+    collection_elapsed_s = 0;
     save_interval = max(1, round(mission_config.sample_rate / 2));  % Save every 0.5 seconds
     last_vehicle_state = struct();
     last_vehicle_state.position = [0, 0, 0];
@@ -320,9 +387,18 @@ try
     
     effective_telemetry_interval = max(mission_config.telemetry_query_interval_s, 1.0);
     effective_control_interval = max(mission_config.control_interval_s, 2.0);
+    flow_flags = struct('no_link_logged', false);
+    try
+        drone_fallback_runtime = autlInitDroneFallbackRuntime(mission_config, log_prefix);
+    catch ME_fallback_init
+        drone_fallback_runtime = struct('enabled', false);
+        fprintf('%s[AutoLandingDataCollection] Warning: drone fallback init unavailable, disabled this scenario: %s\n', ...
+            log_prefix, ME_fallback_init.message);
+    end
 
     while toc(t_start) < mission_config.max_duration
-        t_elapsed = toc(t_start);
+        elapsed_s = toc(t_start);
+        collection_elapsed_s = elapsed_s;
         
         % Sample timing
         if toc(t_last_sample) >= sample_interval
@@ -333,20 +409,29 @@ try
             t_last_sample = tic;
             
             % Query telemetry at a lower rate and reuse latest state for high-rate sampling.
-            if (t_elapsed - last_telemetry_query_time) >= effective_telemetry_interval
+            if (elapsed_s - last_telemetry_query_time) >= effective_telemetry_interval
                 queried_state = autlGetVehicleState(mav_config);
                 if ~(isfield(queried_state, 'mode') && strcmpi(string(queried_state.mode), "NO_LINK"))
                     last_vehicle_state = queried_state;
                 end
-                last_telemetry_query_time = t_elapsed;
+                last_telemetry_query_time = elapsed_s;
             end
             vehicle_state = last_vehicle_state;
+            if isfield(vehicle_state, 'mode') && strcmpi(char(string(vehicle_state.mode)), 'NO_LINK')
+                if ~flow_flags.no_link_logged
+                    autlFlowLog(flow_log_file, 'autlRunDataCollection', 'telemetry_no_link', autlFlowMerge(flow_ctx, struct( ...
+                        'sample_idx', sample_idx, 'elapsed_s', elapsed_s)));
+                    flow_flags.no_link_logged = true;
+                end
+            else
+                flow_flags.no_link_logged = false;
+            end
 
             [mission_config, landing_pad_runtime] = autlUpdateLandingPadRuntime( ...
-                mission_config, landing_pad_runtime, t_elapsed, log_prefix);
+                mission_config, landing_pad_runtime, elapsed_s, log_prefix);
             
             % Store raw data (no processing, no ontology)
-            raw_data.timestamp(sample_idx) = t_elapsed;
+            raw_data.timestamp(sample_idx) = elapsed_s;
             raw_data.position_xyz(sample_idx, :) = vehicle_state.position;
             raw_data.velocity_xyz(sample_idx, :) = vehicle_state.velocity;
             raw_data.attitude_rpy(sample_idx, :) = vehicle_state.attitude_euler;
@@ -369,15 +454,16 @@ try
             raw_data.landing_pad_distance_xy(sample_idx) = hypot(dx_pad, dy_pad);
 
             % Feed velocity setpoints so SITL keeps moving around landing pad.
-            if mission_config.enable_auto_motion && control_state.takeoff_sent && ...
-                    (t_elapsed - control_state.last_control_time) >= effective_control_interval
+                if mission_config.enable_auto_motion && control_state.takeoff_sent && ...
+                    (elapsed_s - control_state.last_control_time) >= effective_control_interval
                 if isfield(vehicle_state, 'has_local_position') && vehicle_state.has_local_position > 0
                     control_cmd = autlComputeTrackingVelocity(vehicle_state.position, mission_config);
                     vel_struct = struct('vx', control_cmd(1), 'vy', control_cmd(2), 'vz', control_cmd(3), ...
                         'duration', min(0.05, effective_control_interval));
                     vel_result = autlMavproxyControl('set_velocity', vel_struct, control_cfg);
                     if ~vel_result.is_success && mod(sample_idx, max(1, round(mission_config.sample_rate))) == 0
-                        fprintf('%s[AutoLandingDataCollection] Warning: velocity command failed: %s\n', log_prefix, vel_result.error_message);
+                        fprintf('%s[AutoLandingDataCollection] Warning: velocity command failed: %s\n', log_prefix, ...
+                            autlCompactMavErrorTop(vel_result.error_message));
                     elseif vel_result.is_success && mod(sample_idx, max(1, round(2 * mission_config.sample_rate))) == 0
                         fprintf('%s[AutoLandingDataCollection] Motion cmd vx=%.2f vy=%.2f vz=%.2f mode=%s\n', ...
                             log_prefix, control_cmd(1), control_cmd(2), control_cmd(3), char(string(vehicle_state.mode)));
@@ -385,12 +471,17 @@ try
                 elseif mod(sample_idx, max(1, round(mission_config.sample_rate))) == 0
                     fprintf('%s[AutoLandingDataCollection] Warning: LOCAL_POSITION_NED unavailable, skipping velocity command this cycle.\n', log_prefix);
                 end
-                control_state.last_control_time = t_elapsed;
+                control_state.last_control_time = elapsed_s;
+            end
+
+            if (~mission_config.enable_auto_motion || ~control_state.takeoff_sent)
+                [mission_config, drone_fallback_runtime] = autlApplyDroneFallbackMotion( ...
+                    mission_config, drone_fallback_runtime, elapsed_s, log_prefix);
             end
             
             % Log entry (simple timestamp marker)
             log_entries{end+1} = sprintf('[%.3f] Sample %d: pos=[%.2f,%.2f,%.2f], vel=[%.2f,%.2f,%.2f]', ...
-                t_elapsed, sample_idx, ...
+                elapsed_s, sample_idx, ...
                 vehicle_state.position(1), vehicle_state.position(2), vehicle_state.position(3), ...
                 vehicle_state.velocity(1), vehicle_state.velocity(2), vehicle_state.velocity(3));
             
@@ -416,7 +507,7 @@ try
 
                     status_text = sprintf(['Session: %s\nSample: %d\nElapsed: %.1fs\nActual Hz: %.2f\n', ...
                         'Mode: %s\nArmed: %d\nLocalPos: %d\nPos: [%.2f, %.2f, %.2f]\nVel: [%.2f, %.2f, %.2f]'], ...
-                        mission_config.session_id, sample_idx, t_elapsed, sample_idx / max(t_elapsed, 1e-3), ...
+                        mission_config.session_id, sample_idx, elapsed_s, sample_idx / max(elapsed_s, 1e-3), ...
                         char(string(vehicle_state.mode)), vehicle_state.armed, ...
                         double(vehicle_state.has_local_position), ...
                         vehicle_state.position(1), vehicle_state.position(2), vehicle_state.position(3), ...
@@ -457,6 +548,10 @@ try
                     raw_mat_path = fullfile(sessionDir, 'raw_data.mat');
                     save(raw_mat_path, 'raw_data_trimmed', '-v7.3');
                     fprintf('%s[AutoLandingDataCollection] Checkpoint saved: %d samples\n', log_prefix, sample_idx);
+                    if mod(sample_idx, 250) == 0
+                        autlFlowLog(flow_log_file, 'autlRunDataCollection', 'checkpoint_saved', autlFlowMerge(flow_ctx, struct( ...
+                            'sample_idx', sample_idx, 'elapsed_s', elapsed_s)));
+                    end
                 catch
                     % Silent fail to avoid disrupting collection
                 end
@@ -501,7 +596,7 @@ try
     % Save metadata
     metadata = struct();
     metadata.session_id = mission_config.session_id;
-    metadata.collection_duration = t_elapsed;
+    metadata.collection_duration = collection_elapsed_s;
     metadata.actual_samples = sample_idx;
     metadata.sample_rate_hz = mission_config.sample_rate;
     metadata.timestamp = datetime('now');
@@ -519,17 +614,20 @@ try
     collection_result.csv_path = raw_csv_path;
     collection_result.metadata_path = metadata_path;
     collection_result.sample_count = sample_idx;
-    collection_result.duration = t_elapsed;
+    collection_result.duration = collection_elapsed_s;
     collection_result.status = 'completed';
     collection_result.landing_pad_topic_status = landing_pad_publish_status;
     autlReleaseLandingPadRuntime(landing_pad_runtime);
+    autlReleaseDroneFallbackRuntime(drone_fallback_runtime);
+    autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_completed', autlFlowMerge(flow_ctx, struct( ...
+        'sample_count', sample_idx, 'duration_s', collection_elapsed_s, 'session_dir', sessionDir)));
 
     if mission_config.enable_auto_motion
         autlMavproxyControl('land', struct(), control_cfg);
     end
     
     fprintf('%s[AutoLandingDataCollection] Collected %d samples in %.1f sec (%.1f Hz actual)\n', log_prefix, ...
-        sample_idx, t_elapsed, sample_idx / t_elapsed);
+        sample_idx, collection_elapsed_s, sample_idx / max(collection_elapsed_s, 1e-3));
     fprintf('%s[AutoLandingDataCollection] Output: %s\n', log_prefix, sessionDir);
     
     % Optionally save visualization snapshot for this scenario.
@@ -582,6 +680,8 @@ catch ME
         collection_result.raw_data_path = raw_mat_path;
         collection_result.sample_count = sample_idx;
         collection_result.duration = toc(t_start);
+        autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_interrupted', autlFlowMerge(flow_ctx, struct( ...
+            'sample_count', sample_idx, 'duration_s', collection_result.duration)));
         
         fprintf('%s[AutoLandingDataCollection] Collection interrupted. Partial data recovered.\n', log_prefix);
     else
@@ -589,11 +689,20 @@ catch ME
         collection_result.status = 'error';
         collection_result.error_message = ME.message;
         fprintf('%s[AutoLandingDataCollection] ERROR: %s\n', log_prefix, ME.message);
+        autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_error', autlFlowMerge(flow_ctx, struct( ...
+            'error', ME.message, 'sample_count', sample_idx)));
 end
 
 try
     if exist('landing_pad_runtime', 'var')
         autlReleaseLandingPadRuntime(landing_pad_runtime);
+    end
+catch
+end
+
+try
+    if exist('drone_fallback_runtime', 'var')
+        autlReleaseDroneFallbackRuntime(drone_fallback_runtime);
     end
 catch
 end
@@ -633,7 +742,7 @@ function vehicle_state = autlGetVehicleState(mav_config)
 % By default, does NOT fake motion when telemetry link is unavailable.
 
 vehicle_state = struct();
-persistent cached_state last_query_tic
+persistent cached_state last_query_tic failed_masters failed_until_s
 
 if ~isfield(mav_config, 'allow_simulated_fallback')
     mav_config.allow_simulated_fallback = false;
@@ -644,9 +753,16 @@ end
 if ~isfield(mav_config, 'fallback_master')
     mav_config.fallback_master = '';
 end
+if ~isfield(mav_config, 'use_fallback_master')
+    mav_config.use_fallback_master = false;
+end
 
 if isempty(last_query_tic)
     last_query_tic = tic;
+end
+if isempty(failed_masters)
+    failed_masters = {};
+    failed_until_s = [];
 end
 if ~isempty(cached_state) && toc(last_query_tic) < mav_config.query_interval_s
     vehicle_state = cached_state;
@@ -656,23 +772,34 @@ end
 % Try pymavlink with short timeout and port fallback.
 try
     masters = {mav_config.master};
-    if strlength(string(mav_config.fallback_master)) > 0
+    if mav_config.use_fallback_master && strlength(string(mav_config.fallback_master)) > 0
         masters{end+1} = char(string(mav_config.fallback_master));
     end
     masters = unique(masters, 'stable');
 
     status = 1;
     telemetry = struct();
+    now_s = posixtime(datetime('now'));
     for i = 1:numel(masters)
+        master_i = masters{i};
+        fail_idx = find(strcmp(failed_masters, master_i), 1);
+        if ~isempty(fail_idx) && failed_until_s(fail_idx) > now_s
+            continue;
+        end
+
         payload = struct('master', masters{i}, 'timeout', 0.35);
         payload_json = jsonencode(payload);
         payload_b64 = matlab.net.base64encode(uint8(payload_json));
         py_code = [ ...
             'import base64,json,sys,time' newline ...
+            'import contextlib,io' newline ...
             'from pymavlink import mavutil' newline ...
             'd = json.loads(base64.b64decode("' payload_b64 '").decode())' newline ...
-            'm = mavutil.mavlink_connection(d["master"], source_system=250)' newline ...
-            'hb = m.wait_heartbeat(timeout=max(0.2,float(d["timeout"])))' newline ...
+            '_mav_stdout = io.StringIO()' newline ...
+            '_mav_stderr = io.StringIO()' newline ...
+            'with contextlib.redirect_stdout(_mav_stdout), contextlib.redirect_stderr(_mav_stderr):' newline ...
+            '  m = mavutil.mavlink_connection(d["master"], source_system=250, autoreconnect=False)' newline ...
+            '  hb = m.wait_heartbeat(timeout=max(0.2,float(d["timeout"])))' newline ...
             'if hb is None:' newline ...
             '  raise RuntimeError("heartbeat timeout")' newline ...
             'try:' newline ...
@@ -718,8 +845,18 @@ try
             try
                 telemetry = jsondecode(strtrim(output_i));
                 status = 0;
+                if ~isempty(fail_idx)
+                    failed_until_s(fail_idx) = 0;
+                end
             catch
                 status = 1;
+            end
+        else
+            if isempty(fail_idx)
+                failed_masters{end+1} = master_i; %#ok<AGROW>
+                failed_until_s(end+1) = now_s + 8.0; %#ok<AGROW>
+            else
+                failed_until_s(fail_idx) = now_s + 8.0;
             end
         end
         if status == 0
@@ -809,6 +946,48 @@ no_link.mode = 'NO_LINK';
 no_link.has_local_position = 0;
 end
 
+function msg = autlCompactMavError(raw_msg)
+% Compact pymavlink/mavproxy multiline stderr into one short line.
+
+msg = strtrim(string(raw_msg));
+if strlength(msg) == 0
+    msg = "unknown";
+    return;
+end
+
+parts = regexp(char(msg), '\\r?\\n', 'split');
+parts = parts(~cellfun('isempty', strtrim(parts)));
+if isempty(parts)
+    msg = "unknown";
+    return;
+end
+
+keep = strings(0, 1);
+for i = 1:numel(parts)
+    p = strtrim(string(parts{i}));
+    p_low = lower(p);
+    if contains(p_low, "eof") && contains(p_low, "tcp socket")
+        continue;
+    end
+    if contains(p_low, "connection refused sleeping") || contains(p_low, "connection refused")
+        continue;
+    end
+    if contains(p_low, "connection reset by peer") || contains(p_low, "connection timed out")
+        continue;
+    end
+    if contains(p_low, "socket closed")
+        continue;
+    end
+    keep(end+1) = p; %#ok<AGROW>
+end
+
+if isempty(keep)
+    msg = "heartbeat timeout";
+else
+    msg = regexprep(char(keep(end)), '\\s+', ' ');
+end
+end
+
 function sim_state = autlGenerateSimulatedVehicleState()
 % Generate realistic simulated vehicle state for data collection
 % When MAVProxy is unavailable, uses physics-based simulation
@@ -879,6 +1058,125 @@ sim_state.rangefinder_dist = altitude_base + altitude_wobble;
 sim_state.armed = (t > 1);
 sim_state.mode = 'GUIDED';
 sim_state.has_local_position = 1;
+end
+end
+
+function msg = autlCompactMavErrorTop(raw_msg)
+% Compact pymavlink/mavproxy multiline stderr into one short line.
+
+msg = strtrim(string(raw_msg));
+if strlength(msg) == 0
+    msg = "unknown";
+    return;
+end
+
+parts = regexp(char(msg), '\\r?\\n', 'split');
+parts = parts(~cellfun('isempty', strtrim(parts)));
+if isempty(parts)
+    msg = "unknown";
+    return;
+end
+
+keep = strings(0, 1);
+for i = 1:numel(parts)
+    p = strtrim(string(parts{i}));
+    p_low = lower(p);
+    if contains(p_low, "eof") && contains(p_low, "tcp socket")
+        continue;
+    end
+    if contains(p_low, "connection refused sleeping") || contains(p_low, "connection refused")
+        continue;
+    end
+    if contains(p_low, "connection reset by peer") || contains(p_low, "connection timed out")
+        continue;
+    end
+    if contains(p_low, "socket closed")
+        continue;
+    end
+    keep(end+1) = p; %#ok<AGROW>
+end
+
+if isempty(keep)
+    msg = "heartbeat timeout";
+else
+    msg = regexprep(char(keep(end)), '\\s+', ' ');
+end
+end
+
+function [res, boot_msg] = autlWaitForMavlinkPrecheckTop(mission_config, control_cfg)
+% Retry MAVLink status for a short window before disabling auto motion.
+
+wait_timeout_s = 40.0;
+if isfield(mission_config, 'mavlink_precheck_timeout_s') && isfinite(mission_config.mavlink_precheck_timeout_s)
+    wait_timeout_s = max(2.0, double(mission_config.mavlink_precheck_timeout_s));
+end
+poll_interval_s = 1.5;
+boot_msg = "not_used";
+did_bootstrap = false;
+
+res = autlMavproxyControl('status', struct(), control_cfg);
+if res.is_success
+    return;
+end
+
+start_t = tic;
+while toc(start_t) < wait_timeout_s
+    if ~did_bootstrap && isfield(mission_config, 'mavlink_master_fallback') && ...
+            strlength(string(mission_config.mavlink_master_fallback)) > 0
+        [~, boot_msg] = autlMaybeBootstrapMavlinkFallbackTop(char(string(mission_config.mavlink_master_fallback)));
+        did_bootstrap = true;
+    end
+
+    pause(poll_interval_s);
+    res = autlMavproxyControl('status', struct(), control_cfg);
+    if res.is_success
+        return;
+    end
+end
+
+if ~res.is_success
+    res.error_message = sprintf('%s (waited %.1fs)', char(string(res.error_message)), wait_timeout_s);
+end
+end
+
+function [ok, msg] = autlMaybeBootstrapMavlinkFallbackTop(fallback_conn)
+% One-shot throttled fallback ping to trigger SITL serial initialization.
+
+ok = false;
+msg = "not_used";
+if nargin < 1 || strlength(string(fallback_conn)) == 0
+    msg = "no_fallback";
+    return;
+end
+
+persistent boot_keys boot_until_s
+if isempty(boot_keys)
+    boot_keys = {};
+    boot_until_s = [];
+end
+
+key = char(string(fallback_conn));
+now_s = posixtime(datetime('now'));
+idx = find(strcmp(boot_keys, key), 1);
+if ~isempty(idx) && boot_until_s(idx) > now_s
+    msg = "throttled";
+    return;
+end
+
+cfg = struct('mav', struct('master_connection', key, 'allow_port_fallback', false));
+res = autlMavproxyControl('status', struct(), cfg);
+ok = logical(res.is_success);
+if ok
+    msg = "ok";
+else
+    msg = "failed:" + autlCompactMavErrorTop(res.error_message);
+end
+
+if isempty(idx)
+    boot_keys{end+1} = key; %#ok<AGROW>
+    boot_until_s(end+1) = now_s + 10.0; %#ok<AGROW>
+else
+    boot_until_s(idx) = now_s + 10.0;
 end
 end
 
@@ -1164,11 +1462,11 @@ if runtime.apply_set_pose
 end
 end
 
-function [mission_config, runtime] = autlUpdateLandingPadRuntime(mission_config, runtime, t_elapsed, log_prefix)
+function [mission_config, runtime] = autlUpdateLandingPadRuntime(mission_config, runtime, elapsed_s, log_prefix)
 % Follow landing_pad_topic values and move Gazebo landing-pad model accordingly.
 
-if runtime.follow_enabled && ((t_elapsed - runtime.last_follow_t) >= runtime.follow_interval_s)
-    runtime.last_follow_t = t_elapsed;
+if runtime.follow_enabled && ((elapsed_s - runtime.last_follow_t) >= runtime.follow_interval_s)
+    runtime.last_follow_t = elapsed_s;
     got_topic_update = false;
     try
         msg = receive(runtime.sub, 0.01);
@@ -1191,7 +1489,7 @@ if runtime.follow_enabled && ((t_elapsed - runtime.last_follow_t) >= runtime.fol
 
     % Keep pad moving even when no external topic publisher is active.
     if runtime.default_motion_enabled && ~got_topic_update
-        theta = runtime.default_motion_rate_rad_s * t_elapsed;
+        theta = runtime.default_motion_rate_rad_s * elapsed_s;
         motion_xy = runtime.default_motion_radius_m * [cos(theta), sin(theta)];
         mission_config.landing_pad_center(1) = runtime.base_center(1) + motion_xy(1);
         mission_config.landing_pad_center(2) = runtime.base_center(2) + motion_xy(2);
@@ -1205,8 +1503,8 @@ if runtime.follow_enabled && ((t_elapsed - runtime.last_follow_t) >= runtime.fol
     end
 end
 
-if runtime.apply_set_pose && ((t_elapsed - runtime.last_pose_t) >= runtime.pose_interval_s)
-    runtime.last_pose_t = t_elapsed;
+if runtime.apply_set_pose && ((elapsed_s - runtime.last_pose_t) >= runtime.pose_interval_s)
+    runtime.last_pose_t = elapsed_s;
     marker_width_ref_m = 0.4;
     marker_scale = max(0.25, mission_config.landing_pad_size(1) / marker_width_ref_m);
     pose_z = mission_config.landing_pad_center(3) + (0.25 * marker_scale);
@@ -1243,6 +1541,131 @@ try
     end
 catch
 end
+end
+
+function runtime = autlInitDroneFallbackRuntime(mission_config, log_prefix)
+% Initialize fallback set_pose motion for the drone model.
+
+runtime = struct();
+runtime.enabled = logical(mission_config.drone_set_pose_fallback_enabled);
+runtime.model_name = char(string(mission_config.drone_set_pose_model_name));
+runtime.model_candidates = {runtime.model_name};
+if isfield(mission_config, 'reset_model_name') && strlength(string(mission_config.reset_model_name)) > 0
+    runtime.model_candidates{end+1} = char(string(mission_config.reset_model_name));
+end
+runtime.model_candidates = [runtime.model_candidates, {'iris_with_gimbal', 'iris_with_gimbal_0', 'iris_with_gimbal_1', 'iris_with_gimbal_2', 'iris'}];
+runtime.model_candidates = unique(runtime.model_candidates, 'stable');
+runtime.active_model_idx = 1;
+runtime.set_pose_service = '';
+runtime.interval_s = max(0.05, double(mission_config.drone_set_pose_interval_s));
+runtime.radius_m = max(0.0, double(mission_config.drone_set_pose_radius_m));
+runtime.rate_rad_s = max(0.0, double(mission_config.drone_set_pose_rate_rad_s));
+runtime.base_xy = double(mission_config.reset_spawn_xy(1:2));
+runtime.base_z = double(mission_config.reset_spawn_z_m);
+runtime.base_yaw_deg = double(mission_config.reset_spawn_yaw_deg);
+runtime.takeoff_height_m = max(0.0, double(mission_config.drone_set_pose_takeoff_height_m));
+runtime.climb_rate_mps = max(0.05, double(mission_config.drone_set_pose_climb_rate_mps));
+runtime.last_t = -inf;
+runtime.warned = false;
+runtime.started = false;
+runtime.t0 = -inf;
+runtime.reached_takeoff_alt = false;
+
+if ~runtime.enabled
+    return;
+end
+
+svc_deadline = tic;
+while toc(svc_deadline) < 12.0
+    [svc_status, svc_out] = system('bash -lc ''gz service -l 2>/dev/null | grep -E "^/world/.*/set_pose$" | head -n1''');
+    if svc_status == 0 && strlength(string(strtrim(svc_out))) > 0
+        runtime.set_pose_service = char(string(strtrim(svc_out)));
+        break;
+    end
+    pause(0.4);
+end
+if strlength(string(runtime.set_pose_service)) == 0
+    runtime.enabled = false;
+    fprintf('%s[AutoLandingDataCollection] Drone fallback motion disabled: /world/*/set_pose not found.\n', log_prefix);
+end
+end
+
+function [mission_config, runtime] = autlApplyDroneFallbackMotion(mission_config, runtime, elapsed_s, log_prefix)
+% Move the drone model on a small circle when MAVLink control is unavailable.
+
+if ~runtime.enabled
+    return;
+end
+if (elapsed_s - runtime.last_t) < runtime.interval_s
+    return;
+end
+runtime.last_t = elapsed_s;
+if runtime.t0 < 0
+    runtime.t0 = elapsed_s;
+end
+
+theta = runtime.rate_rad_s * elapsed_s;
+target_x = runtime.base_xy(1) + runtime.radius_m * cos(theta);
+target_y = runtime.base_xy(2) + runtime.radius_m * sin(theta);
+climb_elapsed = max(0.0, elapsed_s - runtime.t0);
+climb_m = min(runtime.takeoff_height_m, runtime.climb_rate_mps * climb_elapsed);
+target_z = runtime.base_z + climb_m;
+
+target_yaw_rad = deg2rad(runtime.base_yaw_deg) + theta + pi/2;
+qz = sin(target_yaw_rad / 2.0);
+qw = cos(target_yaw_rad / 2.0);
+
+req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
+    'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
+    runtime.model_candidates{runtime.active_model_idx}, target_x, target_y, target_z, qz, qw);
+cmd = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+    runtime.set_pose_service, req);
+[rc, out] = system(cmd);
+
+ok = (rc == 0 && ~contains(lower(string(out)), 'false'));
+if ~ok
+    for mi = 1:numel(runtime.model_candidates)
+        req_i = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
+            'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
+            runtime.model_candidates{mi}, target_x, target_y, target_z, qz, qw);
+        cmd_i = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+            runtime.set_pose_service, req_i);
+        [rc_i, out_i] = system(cmd_i);
+        if rc_i == 0 && ~contains(lower(string(out_i)), 'false')
+            runtime.active_model_idx = mi;
+            runtime.model_name = runtime.model_candidates{mi};
+            rc = rc_i;
+            out = out_i;
+            ok = true;
+            break;
+        end
+    end
+end
+
+if ~ok
+    if ~runtime.warned
+        fprintf('%s[AutoLandingDataCollection] Drone fallback set_pose warning: rc=%d out=%s\n', ...
+            log_prefix, rc, strtrim(string(out)));
+        runtime.warned = true;
+    end
+else
+    mission_config.reset_spawn_xy = [target_x, target_y];
+    mission_config.reset_spawn_z_m = target_z;
+    if ~runtime.started
+        fprintf('%s[AutoLandingDataCollection] Drone fallback motion active (model=%s, r=%.2fm, w=%.2frad/s, takeoff=%.2fm @ %.2fm/s)\n', ...
+            log_prefix, runtime.model_name, runtime.radius_m, runtime.rate_rad_s, runtime.takeoff_height_m, runtime.climb_rate_mps);
+        runtime.started = true;
+    end
+    if ~runtime.reached_takeoff_alt && climb_m >= (runtime.takeoff_height_m - 0.05)
+        fprintf('%s[AutoLandingDataCollection] Drone fallback reached takeoff altitude: z=%.2fm\n', ...
+            log_prefix, target_z);
+        runtime.reached_takeoff_alt = true;
+    end
+end
+end
+
+function autlReleaseDroneFallbackRuntime(~)
+% Reserved for symmetry if runtime cleanup is needed later.
 end
 
 function is_interrupt = autlIsUserInterrupt(ME)
@@ -1357,6 +1780,22 @@ if isnan(last_alt)
     msg = sprintf('no telemetry link within %.1fs', timeout_s);
 else
     msg = sprintf('last alt=%.2fm vz=%.2fm/s mode=%s', last_alt, last_vz, char(last_mode));
+end
+end
+
+function out = autlFlowMerge(base_payload, extra_payload)
+out = struct();
+if nargin >= 1 && isstruct(base_payload)
+    fields = fieldnames(base_payload);
+    for i = 1:numel(fields)
+        out.(fields{i}) = base_payload.(fields{i});
+    end
+end
+if nargin >= 2 && isstruct(extra_payload)
+    fields = fieldnames(extra_payload);
+    for i = 1:numel(fields)
+        out.(fields{i}) = extra_payload.(fields{i});
+    end
 end
 end
 

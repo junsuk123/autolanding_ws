@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import math
+import time
+import io
+import contextlib
 from dataclasses import dataclass
 from collections import deque
 
@@ -30,14 +33,17 @@ class DroneState:
 
 
 class MultiDroneOdomPublisher(Node):
-    def __init__(self, workers: int, base_port: int, step: int):
+    def __init__(self, workers: int, base_port: int, step: int, reconnect_backoff_s: float):
         super().__init__("autolanding_multi_drone_odom")
         self.workers = workers
         self.base_port = base_port
         self.step = step
+        self.reconnect_backoff_s = max(1.0, float(reconnect_backoff_s))
 
         self.states = {}
         self.links = {}
+        self.next_reconnect_time = {}
+        self.last_warn_time = {}
         self.odom_pubs = {}
         self.path_pubs = {}
         self.paths = {}
@@ -48,26 +54,62 @@ class MultiDroneOdomPublisher(Node):
             self.odom_pubs[i] = self.create_publisher(Odometry, f"/drone{i}/odom", 10)
             self.path_pubs[i] = self.create_publisher(Path, f"/drone{i}/path", 10)
             self.paths[i] = deque(maxlen=400)
+            self.next_reconnect_time[i] = 0.0
+            self.last_warn_time[i] = 0.0
             self.links[i] = self._connect_mav(i)
 
         self.timer = self.create_timer(0.05, self._tick)
         self.get_logger().info(f"multi-drone odom publisher started (workers={workers})")
 
+    @staticmethod
+    def _quiet_heartbeat_wait(link, timeout_s: float):
+        # pymavlink prints TCP EOF and reconnect messages directly to stderr.
+        # Keep those low-level lines out of ROS logs; we report concise status ourselves.
+        sink = io.StringIO()
+        with contextlib.redirect_stderr(sink):
+            return link.wait_heartbeat(timeout=timeout_s)
+
+    def _throttled_warn(self, idx: int, msg: str):
+        now = time.monotonic()
+        if now - self.last_warn_time.get(idx, 0.0) >= self.reconnect_backoff_s:
+            self.get_logger().warning(msg)
+            self.last_warn_time[idx] = now
+
     def _connect_mav(self, idx: int):
+        now = time.monotonic()
+        if now < self.next_reconnect_time.get(idx, 0.0):
+            return None
+
         # Try master first, then serial1 telemetry port fallback.
         ports = [self.base_port + self.step * (idx - 1), self.base_port + 2 + self.step * (idx - 1)]
+        last_err = ""
         for p in ports:
             endpoint = f"tcp:127.0.0.1:{p}"
             try:
-                link = mavutil.mavlink_connection(endpoint, source_system=245 + idx)
-                hb = link.wait_heartbeat(timeout=1.0)
+                link = mavutil.mavlink_connection(
+                    endpoint,
+                    source_system=245 + idx,
+                    autoreconnect=False,
+                )
+                hb = self._quiet_heartbeat_wait(link, timeout_s=0.8)
                 if hb is not None:
                     self.get_logger().info(f"drone{idx} connected via {endpoint}")
                     self.states[idx].connected = True
+                    self.next_reconnect_time[idx] = 0.0
                     return link
-            except Exception:
-                pass
-        self.get_logger().warning(f"drone{idx} not connected yet")
+                try:
+                    link.close()
+                except Exception:
+                    pass
+            except Exception as exc:
+                last_err = str(exc)
+
+        self.states[idx].connected = False
+        self.next_reconnect_time[idx] = now + self.reconnect_backoff_s
+        if last_err:
+            self._throttled_warn(idx, f"drone{idx} MAVLink reconnect pending ({last_err})")
+        else:
+            self._throttled_warn(idx, f"drone{idx} MAVLink reconnect pending")
         return None
 
     @staticmethod
@@ -92,25 +134,36 @@ class MultiDroneOdomPublisher(Node):
             return
 
         updated = False
-        for _ in range(20):
-            msg = link.recv_match(blocking=False)
-            if msg is None:
-                break
+        try:
+            for _ in range(20):
+                msg = link.recv_match(blocking=False)
+                if msg is None:
+                    break
 
-            mtype = msg.get_type()
-            if mtype == "LOCAL_POSITION_NED":
-                self.states[idx].x = float(msg.x)
-                self.states[idx].y = float(msg.y)
-                self.states[idx].z = float(msg.z)
-                self.states[idx].vx = float(msg.vx)
-                self.states[idx].vy = float(msg.vy)
-                self.states[idx].vz = float(msg.vz)
-                updated = True
-            elif mtype == "ATTITUDE":
-                self.states[idx].roll = float(msg.roll)
-                self.states[idx].pitch = float(msg.pitch)
-                self.states[idx].yaw = float(msg.yaw)
-                updated = True
+                mtype = msg.get_type()
+                if mtype == "LOCAL_POSITION_NED":
+                    self.states[idx].x = float(msg.x)
+                    self.states[idx].y = float(msg.y)
+                    self.states[idx].z = float(msg.z)
+                    self.states[idx].vx = float(msg.vx)
+                    self.states[idx].vy = float(msg.vy)
+                    self.states[idx].vz = float(msg.vz)
+                    updated = True
+                elif mtype == "ATTITUDE":
+                    self.states[idx].roll = float(msg.roll)
+                    self.states[idx].pitch = float(msg.pitch)
+                    self.states[idx].yaw = float(msg.yaw)
+                    updated = True
+        except Exception as exc:
+            try:
+                link.close()
+            except Exception:
+                pass
+            self.links[idx] = None
+            self.states[idx].connected = False
+            self.next_reconnect_time[idx] = time.monotonic() + self.reconnect_backoff_s
+            self._throttled_warn(idx, f"drone{idx} MAVLink link dropped ({exc})")
+            return
 
         if updated:
             self.states[idx].connected = True
@@ -179,15 +232,22 @@ def main():
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--base-master-port", type=int, default=5760)
     parser.add_argument("--step", type=int, default=10)
+    parser.add_argument("--reconnect-backoff", type=float, default=8.0)
     args = parser.parse_args()
 
     rclpy.init()
-    node = MultiDroneOdomPublisher(max(1, args.workers), args.base_master_port, args.step)
+    node = MultiDroneOdomPublisher(max(1, args.workers), args.base_master_port, args.step, args.reconnect_backoff)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        for link in node.links.values():
+            if link is not None:
+                try:
+                    link.close()
+                except Exception:
+                    pass
         node.destroy_node()
         rclpy.shutdown()
 

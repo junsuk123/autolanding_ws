@@ -64,10 +64,18 @@ session_dir = fullfile(output_base, session_id);
 if ~exist(session_dir, 'dir')
     mkdir(session_dir);
 end
+flow_log_dir = fullfile(session_dir, 'flow_logs');
+if ~exist(flow_log_dir, 'dir')
+    mkdir(flow_log_dir);
+end
+session_flow_log = fullfile(flow_log_dir, 'pipeline_flow.jsonl');
 session_start_time = datetime('now');
 
 fprintf('\n[AutoLandingDataParallel] Session ID: %s\n', session_id);
 fprintf('[AutoLandingDataParallel] Output: %s\n\n', session_dir);
+autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'session_started', struct( ...
+    'session_id', session_id, 'num_workers', num_workers, 'scenarios_per_worker', scenarios_per_worker, ...
+    'total_scenarios', num_workers * scenarios_per_worker));
 
 % Register cleanup function for graceful shutdown (Ctrl+C)
 cleanup_obj = onCleanup(@() autlParallelCleanup(session_dir, num_workers));
@@ -79,6 +87,8 @@ worker_config.sample_rate = 50;  % Hz
 worker_config.scenario_duration = 120;  % seconds
 worker_config.output_dir = session_dir;
 worker_config.worker_log_dir = fullfile(log_base, session_id);
+worker_config.flow_log_dir = flow_log_dir;
+worker_config.flow_log_file = session_flow_log;
 worker_config.gazebo_server_mode = gazebo_server_mode;  % Server or GUI
 worker_config.enable_visualization = enable_visualization;  % Real-time monitoring
 worker_config.mission_overrides = mission_overrides;
@@ -103,14 +113,20 @@ if num_workers == 1 || verLessThan('matlab', '9.9')
     for worker_id = 1:num_workers
         try
             fprintf('[AutoLandingDataParallel] Launching worker %d/%d\n', worker_id, num_workers);
+            autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_launch', struct( ...
+                'worker_id', worker_id, 'mode', 'sequential'));
             worker_cfg_i = autlBuildWorkerConfig(worker_config, worker_id);
             autlDataCollectorWorker(worker_id, worker_cfg_i);
             fprintf('[AutoLandingDataParallel] Worker %d completed.\n\n', worker_id);
+            autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_completed', struct( ...
+                'worker_id', worker_id, 'mode', 'sequential'));
         catch ME
             if autlParallelIsUserInterrupt(ME)
                 rethrow(ME);
             end
             fprintf('[AutoLandingDataParallel] Worker %d FAILED: %s\n', worker_id, ME.message);
+            autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_failed', struct( ...
+                'worker_id', worker_id, 'mode', 'sequential', 'error', ME.message));
             worker_failed = true;
         end
     end
@@ -120,19 +136,21 @@ if num_workers == 1 || verLessThan('matlab', '9.9')
 else
     % Use parallel pool with DataQueue (MATLAB 9.9+)
     fprintf('[AutoLandingDataParallel] Creating parallel pool (%d workers)...\n\n', num_workers);
+    autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'parallel_pool_create', struct('num_workers', num_workers));
     
+    % Always recreate pool to avoid stale worker function cache across reruns.
+    pool = gcp('nocreate');
+    if ~isempty(pool)
+        fprintf('[AutoLandingDataParallel] Recreating existing pool to refresh worker code cache...\n');
+        delete(pool);
+    end
+    pool = parpool(num_workers, 'IdleTimeout', 240);
+
+    % Force workers to reload updated function definitions.
     try
-        pool = parpool(num_workers, 'IdleTimeout', 240);
-    catch ME
-        % Pool might already exist
-        pool = gcp('nocreate');
-        if isempty(pool)
-            error('Failed to create parallel pool: %s', ME.message);
-        end
-        if pool.NumWorkers < num_workers
-            delete(pool);
-            pool = parpool(num_workers, 'IdleTimeout', 240);
-        end
+        pctRunOnAll('rehash; clear functions; clear autlRunDataCollection; clear autlDataCollectorWorker;');
+    catch
+        % Non-fatal; parfor will still proceed.
     end
     
     % Launch workers via parfor
@@ -160,8 +178,12 @@ else
         if strcmp(results{i}, 'success')
             fprintf('  Worker %d: SUCCESS\n', i);
             success_count = success_count + 1;
+            autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_completed', struct( ...
+                'worker_id', i, 'mode', 'parallel'));
         else
             fprintf('  Worker %d: %s\n', i, results{i});
+            autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'worker_failed', struct( ...
+                'worker_id', i, 'mode', 'parallel', 'error', results{i}));
         end
     end
     
@@ -231,6 +253,15 @@ meta_path = fullfile(session_dir, 'session_metadata.json');
 autlSaveJson(meta_path, session_meta);
 
 fprintf('[AutoLandingDataParallel] Session metadata: %s\n', meta_path);
+autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'session_metadata_saved', struct('path', meta_path));
+
+flow_report = autlGenerateFlowStopReport(session_dir);
+if isstruct(flow_report) && isfield(flow_report, 'ok') && flow_report.ok
+    fprintf('[AutoLandingDataParallel] Flow stop report: %s\n', flow_report.report_path);
+end
+
+autlFlowLog(session_flow_log, 'AutoLandingDataParallel', 'session_completed', struct( ...
+    'actual_collected', numel(dir(fullfile(session_dir, 'worker_*', 'scenario_*', 'raw_data.mat')))));
 fprintf('\n[AutoLandingDataParallel] Parallel data collection COMPLETE.\n');
 fprintf('  Next steps: Process collected raw data offline with ontology/AI fusion pipeline.\n\n');
 
@@ -254,6 +285,8 @@ function autlParallelCleanup(session_dir, num_workers)
 % Called automatically when AutoLandingDataParallel ends (including on Ctrl+C)
 
 fprintf('\n[AutoLandingDataParallel.cleanup] Performing cleanup...\n');
+cleanup_flow_log = fullfile(session_dir, 'flow_logs', 'pipeline_flow.jsonl');
+autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'cleanup_started', struct('num_workers', num_workers));
 
 % Kill all Gazebo sim and SITL processes to prevent port conflicts
 fprintf('[AutoLandingDataParallel.cleanup] Killing gazebo and ArduPilot processes...\n');
@@ -263,6 +296,7 @@ try
     system('pkill -f "mavproxy.py" 2>/dev/null');
     pause(0.5);
     fprintf('[AutoLandingDataParallel.cleanup] Processes terminated.\n');
+    autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'processes_terminated', struct());
 catch
     % Silent fail
 end
@@ -273,6 +307,7 @@ try
     if ~isempty(pool)
         fprintf('[AutoLandingDataParallel.cleanup] Deleting parallel pool...\n');
         delete(pool);
+        autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'parallel_pool_deleted', struct());
     end
 catch
     % Silent fail
@@ -285,12 +320,23 @@ try
         % Count completed scenarios
         all_scenarios = dir(fullfile(session_dir, 'worker_*', 'scenario_*'));
         fprintf('[AutoLandingDataParallel.cleanup] Recovered %d scenario directories\n', numel(all_scenarios));
+        autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'session_recovered', struct( ...
+            'scenario_dirs', numel(all_scenarios)));
+
+        % Generate stop report even on interrupted runs.
+        flow_report = autlGenerateFlowStopReport(session_dir);
+        if isstruct(flow_report) && isfield(flow_report, 'ok') && flow_report.ok
+            fprintf('[AutoLandingDataParallel.cleanup] Flow stop report: %s\n', flow_report.report_path);
+            autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'flow_report_generated', struct( ...
+                'report_path', flow_report.report_path));
+        end
     end
 catch
     % Silent fail
 end
 
 fprintf('[AutoLandingDataParallel.cleanup] Cleanup complete.\n');
+autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'cleanup_completed', struct());
 end
 
 function worker_cfg = autlBuildWorkerConfig(base_cfg, worker_id)

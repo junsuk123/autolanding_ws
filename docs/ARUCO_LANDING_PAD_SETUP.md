@@ -51,14 +51,14 @@ Terminal A:
 
 ```bash
 source ~/gz_ros2_aruco_ws/install/setup.bash
-ros2 run ros_gz_bridge parameter_bridge /camera_info@sensor_msgs/msg/CameraInfo@ignition.msgs.CameraInfo
+ros2 run ros_gz_bridge parameter_bridge /camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo
 ```
 
 Terminal B:
 
 ```bash
 source ~/gz_ros2_aruco_ws/install/setup.bash
-ros2 run ros_gz_bridge parameter_bridge /camera@sensor_msgs/msg/Image@ignition.msgs.Image
+ros2 run ros_gz_bridge parameter_bridge /camera@sensor_msgs/msg/Image@gz.msgs.Image
 ```
 
 Terminal C:

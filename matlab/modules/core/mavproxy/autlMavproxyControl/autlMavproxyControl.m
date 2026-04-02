@@ -31,14 +31,40 @@ function result = autlMavproxyControl(action, params, cfg)
     % Timeout for control operation (seconds)
     timeout = 4;
 
-    % Build a small fallback list to tolerate SITL port churn.
-    master_candidates = {master_conn};
-    if contains(master_conn, ':5762')
-        master_candidates{end+1} = strrep(master_conn, ':5762', ':5760');
-    elseif contains(master_conn, ':5760')
-        master_candidates{end+1} = strrep(master_conn, ':5760', ':5762');
+    flow_log_file = '';
+    flow_ctx = struct();
+    flow_log_all_actions = false;
+    if isfield(cfg, 'flow_log_file')
+        flow_log_file = char(string(cfg.flow_log_file));
     end
-    master_candidates = unique(master_candidates, 'stable');
+    if isfield(cfg, 'flow_context') && isstruct(cfg.flow_context)
+        flow_ctx = cfg.flow_context;
+    end
+    if isfield(cfg, 'flow_log_all_actions')
+        flow_log_all_actions = logical(cfg.flow_log_all_actions);
+    end
+
+    if flow_log_all_actions
+        autlFlowLog(flow_log_file, 'autlMavproxyControl', 'action_started', autlFlowMerge(flow_ctx, struct( ...
+            'action', char(string(action)), 'master', char(string(master_conn)))));
+    end
+
+    % Default to a single designated endpoint per worker to avoid
+    % cross-port churn (SERIAL0<->SERIAL1) that causes EOF floods.
+    allow_port_fallback = false;
+    if isfield(cfg, 'mav') && isfield(cfg.mav, 'allow_port_fallback')
+        allow_port_fallback = logical(cfg.mav.allow_port_fallback);
+    end
+
+    master_candidates = {master_conn};
+    if allow_port_fallback
+        if contains(master_conn, ':5762')
+            master_candidates{end+1} = strrep(master_conn, ':5762', ':5760');
+        elseif contains(master_conn, ':5760')
+            master_candidates{end+1} = strrep(master_conn, ':5760', ':5762');
+        end
+        master_candidates = unique(master_candidates, 'stable');
+    end
 
     function [ok, out, err] = run_pymav(action_name, params_struct)
         if nargin < 2 || isempty(params_struct)
@@ -46,12 +72,16 @@ function result = autlMavproxyControl(action, params, cfg)
         end
         py_template = [ ...
             'import base64,json,sys,time' newline ...
+            'import contextlib,io' newline ...
             'from pymavlink import mavutil' newline ...
             'try:' newline ...
             '  d = json.loads(base64.b64decode("__PAYLOAD_B64__").decode())' newline ...
             '  a = d["action"]; p = d["params"]; t = float(d["timeout"])' newline ...
-            '  m = mavutil.mavlink_connection(d["master"], source_system=255)' newline ...
-            '  hb = m.wait_heartbeat(timeout=max(0.8, t))' newline ...
+            '  _mav_stdout = io.StringIO()' newline ...
+            '  _mav_stderr = io.StringIO()' newline ...
+            '  with contextlib.redirect_stdout(_mav_stdout), contextlib.redirect_stderr(_mav_stderr):' newline ...
+            '    m = mavutil.mavlink_connection(d["master"], source_system=255, autoreconnect=False)' newline ...
+            '    hb = m.wait_heartbeat(timeout=max(0.8, t))' newline ...
             '  if hb is None: raise RuntimeError("heartbeat timeout")' newline ...
             '  def set_mode(mode_name):' newline ...
             '    mm = m.mode_mapping() or {}' newline ...
@@ -116,6 +146,7 @@ function result = autlMavproxyControl(action, params, cfg)
             '  print(f"MODE={getattr(m, ''flightmode'', ''UNKNOWN'')}")' newline ...
             '  sys.exit(0)' newline ...
             'except Exception as e:' newline ...
+            '  _noise = (_mav_stdout.getvalue() + _mav_stderr.getvalue()).strip()' newline ...
             '  print(f"ERR:{e}")' newline ...
             '  sys.exit(2)' newline ...
             ];
@@ -132,7 +163,9 @@ function result = autlMavproxyControl(action, params, cfg)
             py_code = strrep(py_template, '__PAYLOAD_B64__', payload_b64);
 
             % Use a here-doc to avoid shell escaping issues.
-            cmd = sprintf('python3 - <<''PY''\n%s\nPY', py_code);
+            % Guard with shell timeout so TCP connect stalls cannot block workers indefinitely.
+            shell_timeout_s = max(3, ceil(timeout + 2));
+            cmd = sprintf('timeout %d python3 - <<''PY''\n%s\nPY', shell_timeout_s, py_code);
             [rc, cmd_out] = system(cmd);
 
             if (rc == 0) && contains(cmd_out, 'OK')
@@ -147,6 +180,17 @@ function result = autlMavproxyControl(action, params, cfg)
                 lines = regexp(char(msg), '\\r?\\n', 'split');
                 lines = lines(~cellfun('isempty', strtrim(lines)));
                 if ~isempty(lines)
+                    line_s = lower(strtrim(string(lines)));
+                    keep_mask = ~contains(line_s, 'eof on tcp socket') & ...
+                                ~contains(line_s, 'socket closed') & ...
+                                ~contains(line_s, 'connection refused sleeping') & ...
+                                ~contains(line_s, 'connection refused') & ...
+                                ~contains(line_s, 'connection reset by peer') & ...
+                                ~contains(line_s, 'connection timed out');
+                    lines = lines(keep_mask);
+                    if isempty(lines)
+                        lines = {'ERR:heartbeat timeout'};
+                    end
                     err_idx = find(startsWith(lines, 'ERR:'), 1, 'last');
                     if ~isempty(err_idx)
                         msg = strtrim(lines{err_idx});
@@ -155,13 +199,17 @@ function result = autlMavproxyControl(action, params, cfg)
                     end
                 end
             end
-            if strlength(string(msg)) == 0
+            if rc == 124
+                msg = sprintf('ERR:heartbeat timeout (shell timeout %ds)', shell_timeout_s);
+            elseif strlength(string(msg)) == 0
                 msg = sprintf('pymavlink command failed (rc=%d)', rc);
             end
+            msg = regexprep(char(string(msg)), '\\s+', ' ');
+            msg = strtrim(msg);
             err_messages(end+1) = sprintf('[%s] %s', master_candidates{i}, msg); %#ok<AGROW>
         end
 
-        err = strjoin(err_messages, newline);
+        err = strjoin(err_messages, ' | ');
     end
     
     try
@@ -276,4 +324,27 @@ function result = autlMavproxyControl(action, params, cfg)
         result.error_message = ME.message;
         result.is_success = false;
     end
+
+    should_log_result = flow_log_all_actions || ~result.is_success;
+    if should_log_result
+        autlFlowLog(flow_log_file, 'autlMavproxyControl', 'action_result', autlFlowMerge(flow_ctx, struct( ...
+            'action', char(string(action)), 'status', char(string(result.status)), ...
+            'is_success', logical(result.is_success), 'error', char(string(result.error_message)))));
+    end
+end
+
+function out = autlFlowMerge(base_payload, extra_payload)
+out = struct();
+if nargin >= 1 && isstruct(base_payload)
+    f1 = fieldnames(base_payload);
+    for i = 1:numel(f1)
+        out.(f1{i}) = base_payload.(f1{i});
+    end
+end
+if nargin >= 2 && isstruct(extra_payload)
+    f2 = fieldnames(extra_payload);
+    for i = 1:numel(f2)
+        out.(f2{i}) = extra_payload.(f2{i});
+    end
+end
 end

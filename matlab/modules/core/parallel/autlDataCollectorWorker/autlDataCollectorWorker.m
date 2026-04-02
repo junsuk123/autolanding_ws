@@ -45,6 +45,9 @@ end
 if ~isfield(config, 'enable_realtime_viz')
     config.enable_realtime_viz = false;
 end
+if ~isfield(config, 'min_samples_per_scenario')
+    config.min_samples_per_scenario = 1;
+end
 if ~isfield(config, 'gazebo_server_mode')
     config.gazebo_server_mode = true;  % Default: server/headless mode
 end
@@ -73,11 +76,20 @@ if ~exist(config.worker_log_dir, 'dir')
 end
 
 worker_log_file = fullfile(config.worker_log_dir, sprintf('worker_%d.log', worker_id));
+worker_flow_log = '';
+if isfield(config, 'flow_log_dir') && strlength(string(config.flow_log_dir)) > 0
+    worker_flow_log = fullfile(char(string(config.flow_log_dir)), sprintf('worker_%d_flow.jsonl', worker_id));
+elseif isfield(config, 'flow_log_file') && strlength(string(config.flow_log_file)) > 0
+    worker_flow_log = char(string(config.flow_log_file));
+end
 log_fid = fopen(worker_log_file, 'a');
 
 fprintf(log_fid, '[Worker %d] Started at %s\n', worker_id, datetime('now'));
 fprintf(log_fid, '[Worker %d] Config: scenarios=%d, rate=%d Hz, duration=%.0f sec\n', ...
     worker_id, config.scenarios_per_worker, config.sample_rate, config.scenario_duration);
+autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_started', struct( ...
+    'worker_id', worker_id, 'scenarios_per_worker', config.scenarios_per_worker, ...
+    'sample_rate', config.sample_rate, 'scenario_duration', config.scenario_duration));
 
 % Register cleanup for this worker
 worker_state = struct('log_fid', log_fid, 'worker_id', worker_id);
@@ -92,6 +104,16 @@ try
             worker_id, scenario_num, config.scenarios_per_worker);
         fprintf(log_fid, '[Worker %d] Collecting scenario %d/%d at %s\n', ...
             worker_id, scenario_num, config.scenarios_per_worker, datetime('now'));
+        autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_started', struct( ...
+            'worker_id', worker_id, 'scenario_num', scenario_num));
+
+        % Force-refresh function cache so workers do not keep stale local-function maps.
+        try
+            rehash;
+            clear functions;
+            clear autlRunDataCollection;
+        catch
+        end
         
         % Setup mission config
         mission_cfg = struct();
@@ -103,6 +125,8 @@ try
         mission_cfg.gazebo_server_mode = config.gazebo_server_mode;  % Pass server mode
         mission_cfg.enable_visualization = config.enable_visualization;  % Pass visualization flag
         mission_cfg.log_prefix = sprintf('[Worker %d] ', worker_id);
+        mission_cfg.flow_log_file = worker_flow_log;
+        mission_cfg.flow_context = struct('worker_id', worker_id, 'scenario_num', scenario_num);
         if isfield(config, 'mission_overrides') && isstruct(config.mission_overrides)
             override_fields = fieldnames(config.mission_overrides);
             for f_idx = 1:numel(override_fields)
@@ -131,6 +155,15 @@ try
             fprintf(log_fid, '[Worker %d] Worker state profile: %s\n', worker_id, char(string(mission_cfg.worker_state_tag)));
         end
 
+        if scenario_num == 1
+            [ready_ok, ready_msg] = autlWaitForMavlinkReady(mission_cfg);
+            if ready_ok
+                fprintf(log_fid, '[Worker %d] MAVLink ready gate passed: %s\n', worker_id, ready_msg);
+            else
+                fprintf(log_fid, '[Worker %d] MAVLink ready gate warning: %s\n', worker_id, ready_msg);
+            end
+        end
+
         if mission_cfg.reset_pose_each_scenario
             [reset_ok, reset_msg] = autlResetGazeboDronePose(mission_cfg);
             if reset_ok
@@ -140,6 +173,8 @@ try
                 fprintf('[Worker %d] Scenario %d pose reset skipped/failed: %s\n', worker_id, scenario_num, reset_msg);
                 fprintf(log_fid, '[Worker %d] Scenario %d pose reset skipped/failed: %s\n', worker_id, scenario_num, reset_msg);
             end
+            autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'pose_reset', struct( ...
+                'worker_id', worker_id, 'scenario_num', scenario_num, 'ok', reset_ok, 'message', reset_msg));
         end
 
         if mission_cfg.reset_ardupilot_each_scenario
@@ -151,6 +186,8 @@ try
                 fprintf('[Worker %d] Scenario %d ArduPilot reset warning: %s\n', worker_id, scenario_num, ap_msg);
                 fprintf(log_fid, '[Worker %d] Scenario %d ArduPilot reset warning: %s\n', worker_id, scenario_num, ap_msg);
             end
+            autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'ardupilot_reset', struct( ...
+                'worker_id', worker_id, 'scenario_num', scenario_num, 'ok', ap_ok, 'message', ap_msg));
         end
 
         if mission_cfg.reset_pose_each_scenario || mission_cfg.reset_ardupilot_each_scenario
@@ -160,6 +197,8 @@ try
         % Raw data collection (NO ontology processing)
         try
             fprintf(log_fid, '[Worker %d] Scenario %d: Calling autlRunDataCollection...\n', worker_id, scenario_num);
+            autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'collection_call', struct( ...
+                'worker_id', worker_id, 'scenario_num', scenario_num));
             result = autlRunDataCollection(rootDir, mission_cfg);
             if ~isstruct(result) || ~isfield(result, 'status')
                 error('AutoLanding:CollectionFailed', 'Invalid collection result for worker %d scenario %d.', worker_id, scenario_num);
@@ -179,10 +218,16 @@ try
             duration = 0.0;
             if isfield(result, 'sample_count'), samples = result.sample_count; end
             if isfield(result, 'duration'), duration = result.duration; end
+            if samples < config.min_samples_per_scenario
+                error('AutoLanding:CollectionInsufficientSamples', ...
+                    'Collected only %d sample(s), below minimum %d.', samples, config.min_samples_per_scenario);
+            end
             fprintf('[Worker %d] Scenario %d: SUCCESS - %d samples in %.1f sec\n', ...
                 worker_id, scenario_num, samples, duration);
             fprintf(log_fid, '[Worker %d] Scenario %d collected: %d samples in %.1f sec\n', ...
                 worker_id, scenario_num, samples, duration);
+            autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_completed', struct( ...
+                'worker_id', worker_id, 'scenario_num', scenario_num, 'samples', samples, 'duration_s', duration));
             scenario_success_count = scenario_success_count + 1;
             
         catch ME
@@ -192,6 +237,8 @@ try
             fprintf('[Worker %d] Scenario %d FAILED: %s\n', worker_id, scenario_num, ME.message);
             fprintf(log_fid, '[Worker %d] Scenario %d FAILED: %s\n', worker_id, scenario_num, ME.message);
             fprintf(log_fid, '%s\n', getReport(ME));
+            autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'scenario_failed', struct( ...
+                'worker_id', worker_id, 'scenario_num', scenario_num, 'error', ME.message));
             scenario_fail_count = scenario_fail_count + 1;
         end
         
@@ -203,6 +250,8 @@ try
         worker_id, scenario_success_count, scenario_fail_count, config.scenarios_per_worker);
     fprintf(log_fid, '[Worker %d] Collection complete at %s (success=%d, failed=%d)\n', ...
         worker_id, datetime('now'), scenario_success_count, scenario_fail_count);
+    autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_completed', struct( ...
+        'worker_id', worker_id, 'success_count', scenario_success_count, 'fail_count', scenario_fail_count));
 
     if scenario_fail_count > 0
         error('AutoLanding:WorkerScenarioFailed', 'Worker %d had %d failed scenario(s).', worker_id, scenario_fail_count);
@@ -213,10 +262,13 @@ catch ME
     if autlWorkerIsUserInterrupt(ME)
         fprintf(log_fid, '[Worker %d] User interrupted. Saved data recovered.\n', worker_id);
         fprintf('[Worker %d] INTERRUPTED - partial results saved.\n', worker_id);
+        autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_interrupted', struct('worker_id', worker_id));
         rethrow(ME);
     else
         fprintf(log_fid, '[Worker %d] CRITICAL ERROR: %s\n', worker_id, ME.message);
         fprintf(log_fid, '%s\n', getReport(ME));
+        autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'worker_failed', struct( ...
+            'worker_id', worker_id, 'error', ME.message));
         rethrow(ME);
     end
 end
@@ -356,6 +408,84 @@ else
 end
 end
 
+function [ok, msg] = autlWaitForMavlinkReady(mission_cfg)
+% Wait briefly at worker startup until the designated MAVLink endpoint responds.
+
+ok = false;
+msg = '';
+
+master_conn = 'tcp:127.0.0.1:5762';
+if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
+    master_conn = char(string(mission_cfg.mavlink_master));
+end
+
+fallback_conn = '';
+if isfield(mission_cfg, 'mavlink_master_fallback') && strlength(string(mission_cfg.mavlink_master_fallback)) > 0
+    fallback_conn = char(string(mission_cfg.mavlink_master_fallback));
+end
+
+wait_timeout_s = 30.0;  % Increased from 18.0 to allow SITL JSON sensor bridge initialization
+if isfield(mission_cfg, 'mavlink_ready_timeout_s')
+    wait_timeout_s = max(2.0, double(mission_cfg.mavlink_ready_timeout_s));
+end
+
+poll_interval_s = 1.0;
+if isfield(mission_cfg, 'mavlink_ready_poll_interval_s')
+    poll_interval_s = max(0.3, double(mission_cfg.mavlink_ready_poll_interval_s));
+end
+
+ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+if isfield(mission_cfg, 'flow_log_file')
+    ctrl_cfg.flow_log_file = mission_cfg.flow_log_file;
+end
+if isfield(mission_cfg, 'flow_context')
+    ctrl_cfg.flow_context = mission_cfg.flow_context;
+end
+ctrl_cfg.flow_log_all_actions = false;
+start_t = tic;
+attempt = 0;
+last_err = "unknown";
+boot_used = false;
+
+while toc(start_t) < wait_timeout_s
+    attempt = attempt + 1;
+    status_res = autlMavproxyControl('status', struct(), ctrl_cfg);
+    if status_res.is_success
+        ok = true;
+        msg = sprintf('master=%s attempts=%d elapsed=%.1fs', master_conn, attempt, toc(start_t));
+        return;
+    end
+
+    last_err = autlSanitizeMavError(status_res.error_message);
+    if strlength(last_err) == 0
+        last_err = "heartbeat timeout";
+    end
+
+    if ~boot_used && strlength(string(fallback_conn)) > 0
+        fb_cfg = struct('mav', struct('master_connection', fallback_conn, 'allow_port_fallback', false));
+        if isfield(mission_cfg, 'flow_log_file')
+            fb_cfg.flow_log_file = mission_cfg.flow_log_file;
+        end
+        if isfield(mission_cfg, 'flow_context')
+            fb_cfg.flow_context = mission_cfg.flow_context;
+        end
+        fb_cfg.flow_log_all_actions = false;
+        fb_res = autlMavproxyControl('status', struct(), fb_cfg);
+        boot_used = true;
+        if fb_res.is_success
+            last_err = "master=" + string(last_err) + ", fallback_bootstrap=ok";
+        else
+            last_err = "master=" + string(last_err) + ", fallback_bootstrap=failed:" + autlSanitizeMavError(fb_res.error_message);
+        end
+    end
+
+    pause(poll_interval_s);
+end
+
+msg = sprintf('timeout after %.1fs (master=%s, attempts=%d, last=%s)', ...
+    wait_timeout_s, master_conn, attempt, char(string(last_err)));
+end
+
 function [ok, msg] = autlResetArduPilotState(mission_cfg)
 % Force ArduPilot into a clean state between scenarios.
 
@@ -365,6 +495,11 @@ parts = strings(0, 1);
 master_conn = 'tcp:127.0.0.1:5762';
 if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
     master_conn = char(string(mission_cfg.mavlink_master));
+end
+
+fallback_conn = '';
+if isfield(mission_cfg, 'mavlink_master_fallback') && strlength(string(mission_cfg.mavlink_master_fallback)) > 0
+    fallback_conn = char(string(mission_cfg.mavlink_master_fallback));
 end
 
 mode_sequence = {'GUIDED'};
@@ -377,27 +512,94 @@ if isfield(mission_cfg, 'reset_mode_sequence') && ~isempty(mission_cfg.reset_mod
 end
 
 ctrl_cfg = struct('mav', struct('master_connection', master_conn));
+if isfield(mission_cfg, 'flow_log_file')
+    ctrl_cfg.flow_log_file = mission_cfg.flow_log_file;
+end
+if isfield(mission_cfg, 'flow_context')
+    ctrl_cfg.flow_context = mission_cfg.flow_context;
+end
+ctrl_cfg.flow_log_all_actions = false;
 
 % Avoid churn: when master is unreachable, skip disarm/mode calls for this scenario.
 status_res = autlMavproxyControl('status', struct(), ctrl_cfg);
 if ~status_res.is_success
-    emsg = strtrim(string(status_res.error_message));
-    if strlength(emsg) == 0
-        emsg = "unknown";
+    % Some SITL instances expose SERIAL1 only after first SERIAL0 touch.
+    [boot_ok, boot_msg] = autlMaybeBootstrapMavlinkFallback(fallback_conn);
+    if boot_ok
+        status_res = autlMavproxyControl('status', struct(), ctrl_cfg);
     end
-    msg = char("skip_reset:mavlink_unreachable(" + emsg + ")");
-    return;
+
+    if ~status_res.is_success
+        emsg = autlSanitizeMavError(status_res.error_message);
+        if strlength(emsg) == 0
+            emsg = "unknown";
+        end
+        if boot_ok
+            msg = char("skip_reset:mavlink_unreachable(" + emsg + "; bootstrap=" + string(boot_msg) + ")");
+        else
+            msg = char("skip_reset:mavlink_unreachable(" + emsg + ")");
+        end
+        return;
+    end
 end
 
 disarm_res = autlMavproxyControl('disarm', struct(), ctrl_cfg);
 if disarm_res.is_success
     parts(end+1) = "disarm=ok"; %#ok<AGROW>
 else
-    emsg = strtrim(string(disarm_res.error_message));
+    emsg = autlSanitizeMavError(disarm_res.error_message);
     if strlength(emsg) == 0
         emsg = "unknown";
     end
     parts(end+1) = "disarm=warn(" + emsg + ")"; %#ok<AGROW>
+end
+
+function [ok, msg] = autlMaybeBootstrapMavlinkFallback(fallback_conn)
+% Perform a throttled one-shot status ping on fallback port to trigger SITL serial init.
+
+ok = false;
+msg = "not_used";
+if nargin < 1 || strlength(string(fallback_conn)) == 0
+    msg = "no_fallback";
+    return;
+end
+
+persistent bootstrap_keys bootstrap_until_s
+if isempty(bootstrap_keys)
+    bootstrap_keys = {};
+    bootstrap_until_s = [];
+end
+
+key = char(string(fallback_conn));
+now_s = posixtime(datetime('now'));
+idx = find(strcmp(bootstrap_keys, key), 1);
+if ~isempty(idx) && bootstrap_until_s(idx) > now_s
+    msg = "throttled";
+    return;
+end
+
+cfg = struct('mav', struct('master_connection', key, 'allow_port_fallback', false));
+if isfield(mission_cfg, 'flow_log_file')
+    cfg.flow_log_file = mission_cfg.flow_log_file;
+end
+if isfield(mission_cfg, 'flow_context')
+    cfg.flow_context = mission_cfg.flow_context;
+end
+cfg.flow_log_all_actions = false;
+res = autlMavproxyControl('status', struct(), cfg);
+ok = logical(res.is_success);
+if ok
+    msg = "ok";
+else
+    msg = "failed:" + autlSanitizeMavError(res.error_message);
+end
+
+if isempty(idx)
+    bootstrap_keys{end+1} = key; %#ok<AGROW>
+    bootstrap_until_s(end+1) = now_s + 10.0; %#ok<AGROW>
+else
+    bootstrap_until_s(idx) = now_s + 10.0;
+end
 end
 
 mode_all_ok = true;
@@ -408,7 +610,7 @@ for mi = 1:numel(mode_sequence)
         parts(end+1) = "mode=" + string(target_mode) + "(ok)"; %#ok<AGROW>
     else
         mode_all_ok = false;
-        emsg = strtrim(string(mode_res.error_message));
+        emsg = autlSanitizeMavError(mode_res.error_message);
         if strlength(emsg) == 0
             emsg = "unknown";
         end
@@ -418,5 +620,49 @@ end
 
 ok = mode_all_ok;
 msg = char(strjoin(parts, ', '));
+end
+
+function emsg = autlSanitizeMavError(raw_msg)
+% Collapse multiline pymavlink errors into compact one-line text.
+
+emsg = strtrim(string(raw_msg));
+if strlength(emsg) == 0
+    return;
+end
+
+parts = regexp(char(emsg), '\\r?\\n', 'split');
+parts = parts(~cellfun('isempty', strtrim(parts)));
+if isempty(parts)
+    emsg = "";
+    return;
+end
+
+keep = strings(0, 1);
+for i = 1:numel(parts)
+    p = strtrim(string(parts{i}));
+    if strlength(p) == 0
+        continue;
+    end
+    p_low = lower(p);
+    if contains(p_low, "eof") && contains(p_low, "tcp socket")
+        continue;
+    end
+    if contains(p_low, "connection refused sleeping")
+        continue;
+    end
+    if contains(p_low, "connection reset by peer")
+        continue;
+    end
+    if contains(p_low, "socket closed")
+        continue;
+    end
+    keep(end+1) = p; %#ok<AGROW>
+end
+
+if isempty(keep)
+    emsg = "heartbeat timeout";
+else
+    emsg = keep(end);
+end
 end
 
