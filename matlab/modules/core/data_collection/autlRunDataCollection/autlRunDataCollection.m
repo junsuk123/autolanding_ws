@@ -105,6 +105,9 @@ end
 if ~isfield(mission_config, 'control_backend_fallback')
     mission_config.control_backend_fallback = true;
 end
+if strcmpi(char(string(mission_config.control_backend)), 'mavros')
+    mission_config.control_backend_fallback = logical(mission_config.control_backend_fallback) && false;
+end
 if ~isfield(mission_config, 'mavros_namespace')
     mission_config.mavros_namespace = '/mavros';
 end

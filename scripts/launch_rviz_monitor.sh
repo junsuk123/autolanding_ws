@@ -44,10 +44,6 @@ source_if_exists() {
 }
 
 pick_domain_id() {
-  if [[ "$DOMAIN_ID" != "auto" ]]; then
-    echo "$DOMAIN_ID"
-    return
-  fi
   echo "0"
 }
 
@@ -61,12 +57,26 @@ export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 # Avoid MATLAB-local Python packages and Qt GUI theme vars from polluting ROS/RViz tools.
 export PYTHONNOUSERSITE=1
 if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
-  SANITIZED_LD_LIBRARY_PATH="$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/usr/local/MATLAB' | paste -sd ':' -)"
+  SANITIZED_LD_LIBRARY_PATH="$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -vE '(/usr/local/MATLAB|/snap/core20|/snap/core22|/snap/)' | paste -sd ':' -)"
   export LD_LIBRARY_PATH="$SANITIZED_LD_LIBRARY_PATH"
 fi
+unset LD_PRELOAD || true
 export QT_PLUGIN_PATH="${QT_PLUGIN_PATH:-/usr/lib/x86_64-linux-gnu/qt5/plugins}"
 export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-/usr/lib/x86_64-linux-gnu/qt5/plugins/platforms}"
 unset QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME || true
+export QT_ACCESSIBILITY=0
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.accessibility.*=false}"
+export QT_X11_NO_MITSHM=1
+export QT_XCB_GL_INTEGRATION=none
+export QT_OPENGL=software
+export LIBGL_ALWAYS_SOFTWARE=1
+export MESA_LOADER_DRIVER_OVERRIDE=llvmpipe
+
+if [[ -z "${XDG_RUNTIME_DIR:-}" ]]; then
+  export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${USER:-rviz}"
+fi
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 echo "[INFO] ROOT_DIR=$ROOT_DIR"
 echo "[INFO] ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
@@ -121,17 +131,14 @@ nohup python3 "$ROOT_DIR/scripts/publish_multi_drone_odom.py" --workers "$WORKER
 echo "[INFO] launching RViz"
 
 restart_count=0
-max_restarts=5
 while true; do
   set +e
-  env QT_QPA_PLATFORM=xcb rviz2 -d "$autolanding_rviz_cfg"
+  env -i HOME="$HOME" USER="${USER:-rviz}" PATH="/usr/bin:/bin" DISPLAY="${DISPLAY:-:0}" XAUTHORITY="${XAUTHORITY:-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    bash -lc 'source /opt/ros/humble/setup.bash >/dev/null 2>&1; source "$HOME/gz_ros2_aruco_ws/install/setup.bash" >/dev/null 2>&1; source "$HOME/SynologyDrive/INCSL/devel/INCSL/IICC26_ws/install/setup.bash" >/dev/null 2>&1; export ROS_DOMAIN_ID=0; exec env QT_QPA_PLATFORM=xcb QT_ACCESSIBILITY=0 QT_XCB_GL_INTEGRATION=none QT_OPENGL=software LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe rviz2 -d '"$autolanding_rviz_cfg"''
   rviz_exit=$?
   set -e
   echo "[WARN] rviz2 exited with code ${rviz_exit}"
   restart_count=$((restart_count + 1))
-  if [[ "$restart_count" -ge "$max_restarts" ]]; then
-    echo "[ERROR] rviz2 exceeded restart limit (${max_restarts}); stopping launcher"
-    exit "$rviz_exit"
-  fi
+  echo "[INFO] restarting rviz2 (attempt ${restart_count})"
   sleep 2
 done

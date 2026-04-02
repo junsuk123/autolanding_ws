@@ -10,7 +10,6 @@ BASE_SERIAL1_PORT=5762
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain)
-      DOMAIN_ID="${2:-0}"
       shift 2
       ;;
     --workers)
@@ -43,9 +42,7 @@ source_if_exists() {
   fi
 }
 
-if [[ "$DOMAIN_ID" == "auto" ]]; then
-  DOMAIN_ID="0"
-fi
+DOMAIN_ID="0"
 
 if ! [[ "$WORKER_COUNT" =~ ^[0-9]+$ ]] || [[ "$WORKER_COUNT" -lt 1 ]]; then
   echo "[ERROR] invalid --workers value: $WORKER_COUNT"
@@ -91,7 +88,6 @@ for ((i=1; i<=WORKER_COUNT; i++)); do
   nohup ros2 run mavros mavros_node --ros-args \
     -r __ns:="${ns}" \
     -p fcu_url:="${fcu_url}" \
-    -p gcs_url:="" \
     > "${log_file}" 2>&1 &
 
   echo "${i},${ns},${fcu_url},${log_file}" >> /tmp/autolanding_mavros_nodes.txt

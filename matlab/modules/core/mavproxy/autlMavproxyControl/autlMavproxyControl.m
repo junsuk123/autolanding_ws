@@ -54,6 +54,7 @@ function result = autlMavproxyControl(action, params, cfg)
 
     control_backend = 'mavproxy';
     allow_backend_fallback = true;
+    prefer_mavros_only = false;
     if isfield(cfg, 'control') && isstruct(cfg.control)
         if isfield(cfg.control, 'backend') && strlength(string(cfg.control.backend)) > 0
             control_backend = lower(char(string(cfg.control.backend)));
@@ -61,6 +62,18 @@ function result = autlMavproxyControl(action, params, cfg)
         if isfield(cfg.control, 'allow_backend_fallback')
             allow_backend_fallback = logical(cfg.control.allow_backend_fallback);
         end
+        if isfield(cfg.control, 'prefer_mavros_only')
+            prefer_mavros_only = logical(cfg.control.prefer_mavros_only);
+        end
+    end
+
+    if strcmp(control_backend, 'mavros') && ~prefer_mavros_only
+        % In worker MAVROS mode, keep a single control path to avoid
+        % repeatedly touching tcp:57xx probes that can interfere with FCU link stability.
+        prefer_mavros_only = true;
+    end
+    if prefer_mavros_only
+        allow_backend_fallback = false;
     end
 
     if strcmp(control_backend, 'mavros')
@@ -403,10 +416,24 @@ end
 
 shell_timeout_s = max(1, ceil(timeout_s + 1));
 
+requires_connected_fcu = ismember(lower(action), {'status', 'arm', 'disarm', 'set_mode', 'takeoff', 'land'});
+if requires_connected_fcu
+    [connected_ok, connected_msg, connected_out] = autlWaitForMavrosConnected(ns, source_overlay, max(4.0, timeout_s + 2.0));
+    if ~connected_ok
+        result.status = 'mavros_not_connected';
+        result.error_message = connected_msg;
+        result.output = connected_out;
+        return;
+    end
+end
+
 switch lower(action)
     case 'status'
-        cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 topic echo --once %s/state''', ...
-            source_overlay, shell_timeout_s, ns);
+        result.status = 'status_obtained';
+        result.is_success = true;
+        result.output = sprintf('connected: true (%s)', ns);
+        ok = true;
+        return;
     case 'arm'
         cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 service call %s/cmd/arming mavros_msgs/srv/CommandBool "{value: true}"''', ...
             source_overlay, shell_timeout_s, ns);
@@ -452,24 +479,39 @@ end
 [rc, out] = system(cmd);
 result.output = out;
 if rc == 0
-    result.is_success = true;
-    switch lower(action)
-        case 'arm'
-            result.status = 'armed';
-        case 'disarm'
-            result.status = 'disarmed';
-        case 'takeoff'
-            result.status = 'takeoff_initiated';
-        case 'land'
-            result.status = 'land_initiated';
-        case 'set_mode'
-            result.status = 'mode_set';
-        case 'set_velocity'
-            result.status = 'velocity_sent';
-        otherwise
-            result.status = 'status_obtained';
+    out_low = lower(char(string(out)));
+    service_ok = true;
+    if ismember(lower(action), {'arm', 'disarm', 'takeoff', 'land'})
+        service_ok = ~isempty(regexp(out_low, 'success\s*:\s*true', 'once'));
+    elseif strcmpi(action, 'set_mode')
+        service_ok = ~isempty(regexp(out_low, 'mode_sent\s*:\s*true', 'once')) || ...
+                     ~isempty(regexp(out_low, 'success\s*:\s*true', 'once'));
     end
-    ok = true;
+
+    if service_ok
+        result.is_success = true;
+        switch lower(action)
+            case 'arm'
+                result.status = 'armed';
+            case 'disarm'
+                result.status = 'disarmed';
+            case 'takeoff'
+                result.status = 'takeoff_initiated';
+            case 'land'
+                result.status = 'land_initiated';
+            case 'set_mode'
+                result.status = 'mode_set';
+            case 'set_velocity'
+                result.status = 'velocity_sent';
+            otherwise
+                result.status = 'status_obtained';
+        end
+        ok = true;
+    else
+        result.is_success = false;
+        result.status = 'mavros_action_failed';
+        result.error_message = strtrim(out);
+    end
 else
     result.is_success = false;
     result.status = 'mavros_action_failed';
@@ -479,6 +521,47 @@ else
         result.error_message = strtrim(out);
     end
 end
+end
+
+function [ok, msg, out] = autlWaitForMavrosConnected(ns, source_overlay, timeout_s)
+% Poll MAVROS state until FCU link is connected:true.
+
+ok = false;
+msg = 'mavros state unavailable';
+out = '';
+
+poll_s = 0.8;
+start_t = tic;
+
+while toc(start_t) < timeout_s
+    remain_s = max(1, ceil(timeout_s - toc(start_t)));
+    sample_timeout_s = min(3, remain_s);
+    cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 topic echo --once %s/state''', ...
+        source_overlay, sample_timeout_s, ns);
+    [rc, cmd_out] = system(cmd);
+    out = cmd_out;
+
+    if rc == 0
+        out_low = lower(char(string(cmd_out)));
+        if contains(out_low, 'connected: true')
+            ok = true;
+            msg = 'connected';
+            return;
+        end
+        msg = 'connected=false';
+    elseif rc == 124
+        msg = sprintf('state echo timeout (%ds)', sample_timeout_s);
+    else
+        msg = strtrim(char(string(cmd_out)));
+        if strlength(string(msg)) == 0
+            msg = sprintf('state echo failed (rc=%d)', rc);
+        end
+    end
+
+    pause(poll_s);
+end
+
+msg = sprintf('MAVROS FCU not connected on %s within %.1fs (%s)', ns, timeout_s, msg);
 end
 
 function out = autlFlowMerge(base_payload, extra_payload)

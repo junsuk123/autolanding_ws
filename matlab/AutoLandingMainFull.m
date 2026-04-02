@@ -39,7 +39,7 @@ function AutoLandingMainFull(varargin)
     takeoff_height_m = 3.0;             % Takeoff altitude used before motion commands
     enable_multi_drone_profiles = true; % Enable worker-specific MAVLink/model/spawn/motion profiles
     control_backend = 'mavros';         % 'mavproxy' or 'mavros' (default: mavros)
-    control_backend_fallback = true;    % If mavros control fails/unavailable, fallback to mavproxy
+    control_backend_fallback = false;   % MAVROS 모드에서는 TCP 폴백을 기본 비활성화(링크 churn 방지)
     mavros_namespace = '/mavros';       % ROS2 MAVROS namespace when control_backend='mavros'
     mavros_namespace_prefix = '/mavros_w'; % Worker-specific MAVROS namespaces: /mavros_w1, /mavros_w2, ...
     auto_launch_mavros_bridge = true;   % Launch MAVROS bridge automatically in STEP 0 when backend=mavros
@@ -62,7 +62,7 @@ function AutoLandingMainFull(varargin)
     aruco_visibility_poll_interval_s = 2.0;
     aruco_visibility_min_markers = 1;
     spawn_layout_mode = 'auto';          % auto = square-ish, square = near-square, rectangle = wider rectangle
-    spawn_layout_spacing_m = 3.2;        % Tighter spacing so drones stay near the central landing pad
+    spawn_layout_spacing_m = 12.2;        % Tighter spacing so drones stay near the central landing pad
     spawn_layout_center_xy = landing_pad_center(1:2);
     mavlink_init_timeout_s = 120.0;     % Startup heartbeat readiness budget (seconds)
     mavlink_poll_interval_s = 1.0;      % Polling interval for startup heartbeat checks
@@ -1047,7 +1047,7 @@ if nargin < 3 || isempty(num_workers)
     num_workers = 1;
 end
 
-cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
+cmd = sprintf('bash -lc ''nohup bash "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
     launch_script, char(string(ros_domain_id)), num_workers);
 [rc, ~] = system(cmd);
 if rc == 0
@@ -1076,7 +1076,7 @@ if nargin < 4 || strlength(string(namespace_prefix)) == 0
     namespace_prefix = '/mavros_w';
 end
 
-cmd = sprintf('bash -lc ''nohup "%s" --domain "%s" --workers %d --namespace-prefix "%s" > /tmp/autolanding_mavros_launcher.log 2>&1 &''', ...
+cmd = sprintf('bash -lc ''nohup bash "%s" --domain "%s" --workers %d --namespace-prefix "%s" > /tmp/autolanding_mavros_launcher.log 2>&1 &''', ...
     launch_script, char(string(ros_domain_id)), num_workers, char(string(namespace_prefix)));
 [rc, ~] = system(cmd);
 if rc == 0
