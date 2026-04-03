@@ -60,10 +60,15 @@ catch
     fprintf('[WARNING] Diagnostic check failed\n');
 end
 
-% Run AutoLandingMain in sim mode
-fprintf('\n[SIMULATION] Starting full simulation (pipeline + mission)...\n');
+% Run full end-to-end pipeline from single entrypoint.
+fprintf('\n[SIMULATION] Starting full simulation via AutoLandingMainFull...\n');
 try
-    AutoLandingMain('sim');
+    mode_env = strtrim(getenv('AUTOLANDING_GAZEBO_MODE'));
+    if strcmpi(mode_env, 'server') || strcmpi(mode_env, 'headless')
+        AutoLandingMainFull('server');
+    else
+        AutoLandingMainFull('gui');
+    end
     fprintf('\n[SUCCESS] Simulation completed!\n');
 catch ME
     fprintf('\n[ERROR] Simulation failed: %s\n', ME.message);

@@ -35,11 +35,38 @@ for i = 1:min(num_scenarios, num_train + num_val)
         % Features: [mean_pos, mean_vel, mean_alt, max_alt, position_variance, velocity_variance, battery_trend]
         features = autlExtractFeaturesFromRawData(raw_data);
         
-        % Label: 1 = landing success (small final distance), 0 = fail
-        % Simple heuristic: last 10 samples low variance = success
-        final_pos = raw_data.position_xyz(end, :);
-        pos_variance = var(raw_data.position_xyz(max(1,end-10):end, :), [], 1);
-        landing_success = mean(pos_variance) < 0.1;  % Heuristic threshold
+        % Label: 1 = valid flight with landing-like terminal behavior, 0 = otherwise.
+        % This explicitly rejects no-takeoff/no-motion runs that used to look like false TP.
+        pos = raw_data.position_xyz;
+        z = pos(:, 3);
+        xy = pos(:, 1:2);
+        alt_gain = max(z) - min(z);
+        xy_span = max(max(xy, [], 1) - min(xy, [], 1));
+        if size(xy, 1) >= 2
+            dxy = diff(xy, 1, 1);
+            xy_travel = sum(hypot(dxy(:, 1), dxy(:, 2)));
+        else
+            xy_travel = 0;
+        end
+
+        armed_ratio = 0;
+        if isfield(raw_data, 'armed_state') && ~isempty(raw_data.armed_state)
+            armed_ratio = mean(double(raw_data.armed_state) > 0.5);
+        end
+
+        final_dist_xy = inf;
+        if isfield(raw_data, 'landing_pad_distance_xy') && ~isempty(raw_data.landing_pad_distance_xy)
+            final_dist_xy = double(raw_data.landing_pad_distance_xy(end));
+        elseif isfield(raw_data, 'landing_pad_center_xyz') && ~isempty(raw_data.landing_pad_center_xyz)
+            lp = raw_data.landing_pad_center_xyz(end, 1:2);
+            final_dist_xy = norm(xy(end, :) - lp);
+        end
+
+        final_window = max(1, size(pos, 1) - 10):size(pos, 1);
+        pos_variance = var(pos(final_window, :), [], 1);
+        terminal_stable = mean(pos_variance) < 0.08;
+        flight_happened = (alt_gain >= 0.8) && ((xy_span >= 0.5) || (xy_travel >= 3.0)) && (armed_ratio >= 0.3);
+        landing_success = flight_happened && (final_dist_xy <= 1.0) && terminal_stable;
         
         all_X = [all_X; features];
         all_y = [all_y; landing_success];

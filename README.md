@@ -104,6 +104,37 @@ This workspace supports the following experimental flow for thesis/paper reporti
 - scripts: workspace bootstrap and pipeline runners
 - tests: smoke tests
 
+## 3.1 ROS2-Gazebo communication hardening (official alignment)
+
+To reduce startup race conditions and FCU disconnection, this workspace follows the
+ArduPilot official ROS2-Gazebo flow as closely as possible:
+
+1. Source ROS2 + overlay workspaces in order:
+- `/opt/ros/humble`
+- `~/ardu_ws/install` (if available)
+- `~/gz_ros2_aruco_ws/install` (if available)
+- `../IICC26_ws/install` (if available)
+
+2. Use a fixed Gazebo major version:
+- `GZ_VERSION=harmonic` (default in helper scripts)
+
+3. Start SITL with explicit JSON endpoint:
+- `./build/sitl/bin/arducopter --model JSON:127.0.0.1 ...`
+
+4. For MAVROS mode, gate readiness on state-topic connection:
+- Require `/mavros_w*/state` to report `connected: true`
+
+5. Keep ROS domain consistent across all processes:
+- Use one shared `ROS_DOMAIN_ID` (or leave default globally)
+- Avoid per-process ad-hoc overrides
+
+Quick verification commands:
+
+```bash
+bash scripts/verify_gz_ardupilot_stack.sh
+bash scripts/verify_mavros2_setup.sh
+```
+
 ## 4. Quick start (MATLAB)
 
 ### 4.1 Pipeline only (generate trajectory)

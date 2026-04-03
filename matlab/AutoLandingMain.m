@@ -177,7 +177,6 @@ try
     
     % Kill background processes to prevent port conflicts
     system('pkill -f "gz sim" 2>/dev/null');
-    system('pkill -f "arducopter" 2>/dev/null');
     system('pkill -f "mavproxy.py" 2>/dev/null');
     
     % Delete parallel pool if exists

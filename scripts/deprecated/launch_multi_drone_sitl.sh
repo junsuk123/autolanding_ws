@@ -15,20 +15,31 @@ if [[ ! -x "$BIN_PATH" ]]; then
 fi
 
 mkdir -p /tmp/autolanding_sitl
+PID_FILE="/tmp/autolanding_sitl/pids.txt"
+
+cleanup_instance() {
+  local i="$1"
+  # Kill only matching SITL instance index to avoid duplicate ArduPilot workers.
+  pkill -f "arducopter.*--model JSON.*-I${i}( |$)" 2>/dev/null || true
+}
 
 start_instance() {
   local i="$1"
   local sim_addr="127.0.0.1"
   local log_file="/tmp/autolanding_sitl/arducopter_I${i}.log"
-  local cmd=("$BIN_PATH" --model JSON --speedup 1 --slave 0 \
+  local cmd=("$BIN_PATH" --model "JSON:${sim_addr}" --speedup 1 --slave 0 \
     --defaults "$ARDUPILOT_DIR/Tools/autotest/default_params/copter.parm,$ARDUPILOT_DIR/Tools/autotest/default_params/gazebo-iris.parm" \
-    --sim-address="$sim_addr" -I"$i")
+    -I"$i")
 
+  cleanup_instance "$i"
+  sleep 0.2
   nohup setsid "${cmd[@]}" > "$log_file" 2>&1 < /dev/null &
+  echo "$!,$i,$log_file" >> "$PID_FILE"
   echo "[INFO] I${i} started (sim_addr=${sim_addr}, master tcp:127.0.0.1:$((5760 + 10*i)), serial1 tcp:127.0.0.1:$((5762 + 10*i))) log=$log_file"
 }
 
 echo "[INFO] launching $COUNT SITL instances"
+: > "$PID_FILE"
 for ((i=0; i<COUNT; i++)); do
   start_instance "$i"
   sleep 1

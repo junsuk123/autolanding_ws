@@ -56,7 +56,7 @@ if pgrep -f "arducopter.*JSON" > /dev/null; then
     echo "[OK] ArduPilot SITL is running"
 else
     echo "[WARNING] ArduPilot SITL not detected"
-    echo "[HINT] Start in separate terminal: cd ~/ardupilot && ./build/sitl/bin/arducopter --model JSON ..."
+    echo "[HINT] Start in separate terminal: cd ~/ardupilot && ./build/sitl/bin/arducopter --model JSON:127.0.0.1 ..."
 fi
 
 # Test MAVProxy connection

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DOMAIN_ID="0"
 START_BRIDGE=1
 START_ARUCO=1
 WORKER_COUNT=1
@@ -13,12 +12,13 @@ ODOM_PID=""
 RVIZ_PID=""
 STOP_ONLY=0
 
+if [[ -f "$ROOT_DIR/scripts/common_ros_env.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "$ROOT_DIR/scripts/common_ros_env.sh"
+fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --domain)
-      DOMAIN_ID="${2:-auto}"
-      shift 2
-      ;;
     --no-bridge)
       START_BRIDGE=0
       shift
@@ -111,27 +111,16 @@ fi
 
 echo $$ > "$PIDFILE"
 
-source_if_exists() {
-  local p="$1"
-  if [[ -f "$p" ]]; then
-    # shellcheck disable=SC1090
-    set +u
-    source "$p"
-    set -u
-    echo "[INFO] sourced: $p"
-  fi
-}
-
-pick_domain_id() {
-  echo "0"
-}
-
-source_if_exists "/opt/ros/humble/setup.bash"
-source_if_exists "$HOME/gz_ros2_aruco_ws/install/setup.bash"
-source_if_exists "$HOME/SynologyDrive/INCSL/devel/INCSL/IICC26_ws/install/setup.bash"
-
-export ROS_DOMAIN_ID="$(pick_domain_id)"
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+if declare -F autl_source_ros_stacks >/dev/null 2>&1; then
+  autl_source_ros_stacks "$ROOT_DIR"
+fi
+if declare -F autl_export_comm_defaults >/dev/null 2>&1; then
+  autl_export_comm_defaults
+else
+  export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+  export PYTHONNOUSERSITE=1
+  export GZ_VERSION="${GZ_VERSION:-harmonic}"
+fi
 
 # Avoid MATLAB-local Python packages and Qt GUI theme vars from polluting ROS/RViz tools.
 export PYTHONNOUSERSITE=1
@@ -158,7 +147,8 @@ mkdir -p "$XDG_RUNTIME_DIR"
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
 echo "[INFO] ROOT_DIR=$ROOT_DIR"
-echo "[INFO] ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
+echo "[INFO] ROS_DOMAIN_ID: environment default (no override)"
+echo "[INFO] GZ_VERSION=$GZ_VERSION"
 echo "[INFO] WORKER_COUNT=$WORKER_COUNT"
 
 autolanding_rviz_cfg="$ROOT_DIR/simulation/configs/autolanding_monitor.rviz"
@@ -216,8 +206,14 @@ echo "[INFO] launching RViz"
 restart_count=0
 while true; do
   set +e
+  ros_setup_cmd=""
+  ros_setup_cmd+="if [[ -f '$ROOT_DIR/scripts/common_ros_env.sh' ]]; then source '$ROOT_DIR/scripts/common_ros_env.sh' >/dev/null 2>&1; "
+  ros_setup_cmd+="declare -F autl_source_ros_stacks >/dev/null 2>&1 && autl_source_ros_stacks '$ROOT_DIR' >/dev/null 2>&1; "
+  ros_setup_cmd+="declare -F autl_export_comm_defaults >/dev/null 2>&1 && autl_export_comm_defaults >/dev/null 2>&1; fi; "
+  ros_setup_cmd+="exec env QT_QPA_PLATFORM=xcb QT_ACCESSIBILITY=0 QT_XCB_GL_INTEGRATION=none QT_OPENGL=software LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe rviz2 -d '$autolanding_rviz_cfg'"
+
   setsid env -i HOME="$HOME" USER="${USER:-rviz}" PATH="/usr/bin:/bin" DISPLAY="${DISPLAY:-:0}" XAUTHORITY="${XAUTHORITY:-}" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
-    bash -lc 'source /opt/ros/humble/setup.bash >/dev/null 2>&1; source "$HOME/gz_ros2_aruco_ws/install/setup.bash" >/dev/null 2>&1; source "$HOME/SynologyDrive/INCSL/devel/INCSL/IICC26_ws/install/setup.bash" >/dev/null 2>&1; export ROS_DOMAIN_ID=0; exec env QT_QPA_PLATFORM=xcb QT_ACCESSIBILITY=0 QT_XCB_GL_INTEGRATION=none QT_OPENGL=software LIBGL_ALWAYS_SOFTWARE=1 MESA_LOADER_DRIVER_OVERRIDE=llvmpipe rviz2 -d '"$autolanding_rviz_cfg"'' &
+    bash -lc "$ros_setup_cmd" &
   RVIZ_PID=$!
   wait "$RVIZ_PID"
   rviz_exit=$?

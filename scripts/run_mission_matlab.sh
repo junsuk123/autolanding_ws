@@ -61,7 +61,7 @@ else
     echo "[WARNING] Could not connect to vehicle at tcp:127.0.0.1:5762 or tcp:127.0.0.1:5760"
     echo "[WARNING] Ensure Gazebo + ArduPilot SITL are running:"
     echo "  Terminal 1: gz sim -s iris_runway.sdf"
-    echo "  Terminal 2: ./build/sitl/bin/arducopter --model JSON ..."
+    echo "  Terminal 2: ./build/sitl/bin/arducopter --model JSON:127.0.0.1 ..."
 fi
 
 # Run MATLAB mission

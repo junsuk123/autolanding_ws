@@ -6,18 +6,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-source_if_exists() {
-  local p="$1"
-  if [[ -f "$p" ]]; then
-    # shellcheck disable=SC1090
-    set +u
-    source "$p"
-    set -u
-  fi
-}
+if [[ -f "$WS_ROOT/scripts/common_ros_env.sh" ]]; then
+  # shellcheck disable=SC1090
+  source "$WS_ROOT/scripts/common_ros_env.sh"
+fi
 
-source_if_exists "/opt/ros/humble/setup.bash"
-source_if_exists "$WS_ROOT/../IICC26_ws/install/setup.bash"
+if declare -F autl_source_ros_stacks >/dev/null 2>&1; then
+  autl_source_ros_stacks "$WS_ROOT"
+fi
+if declare -F autl_export_comm_defaults >/dev/null 2>&1; then
+  autl_export_comm_defaults
+fi
 
 echo "[check] ros2 command"
 if ! command -v ros2 >/dev/null 2>&1; then

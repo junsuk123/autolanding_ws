@@ -33,10 +33,15 @@ else
     error('[ERROR] Core modules directory not found at %s', core_dir);
 end
 
-% Run AutoLandingMain in mission mode
-fprintf('\n[MISSION] Starting autonomous mission in MATLAB...\n');
+% Use the full single-entry pipeline to avoid split startup paths.
+fprintf('\n[MISSION] Starting autonomous mission via AutoLandingMainFull...\n');
 try
-    AutoLandingMain('mission');
+    mode_env = strtrim(getenv('AUTOLANDING_GAZEBO_MODE'));
+    if strcmpi(mode_env, 'server') || strcmpi(mode_env, 'headless')
+        AutoLandingMainFull('server');
+    else
+        AutoLandingMainFull('gui');
+    end
     fprintf('\n[SUCCESS] Mission completed successfully!\n');
 catch ME
     fprintf('\n[ERROR] Mission failed: %s\n', ME.message);

@@ -31,7 +31,7 @@ function AutoLandingMainFull(varargin)
             gazebo_server_mode = true;
         end
     end
-    
+
     % Data Collection Settings
     num_workers = 3;                    % Number of parallel workers
     scenarios_per_worker = 200;           % Scenarios per worker (total = num_workers * scenarios_per_worker)
@@ -46,7 +46,28 @@ function AutoLandingMainFull(varargin)
 
     % RViz / ROS observability
     enable_rviz_monitor = true;
-    ros_domain_id = '0';                % Unified default ROS domain
+
+    % Optional environment overrides for quick validation runs.
+    env_num_workers = str2double(getenv('AUTOLANDING_NUM_WORKERS'));
+    if isfinite(env_num_workers) && env_num_workers >= 1
+        num_workers = max(1, round(env_num_workers));
+    end
+    env_scenarios_per_worker = str2double(getenv('AUTOLANDING_SCENARIOS_PER_WORKER'));
+    if isfinite(env_scenarios_per_worker) && env_scenarios_per_worker >= 1
+        scenarios_per_worker = max(1, round(env_scenarios_per_worker));
+    end
+    env_enable_rviz = lower(strtrim(getenv('AUTOLANDING_ENABLE_RVIZ')));
+    if strcmp(env_enable_rviz, '0') || strcmp(env_enable_rviz, 'false')
+        enable_rviz_monitor = false;
+    elseif strcmp(env_enable_rviz, '1') || strcmp(env_enable_rviz, 'true')
+        enable_rviz_monitor = true;
+    end
+    env_enable_vis = lower(strtrim(getenv('AUTOLANDING_ENABLE_VISUALIZATION')));
+    if strcmp(env_enable_vis, '0') || strcmp(env_enable_vis, 'false')
+        enable_visualization = false;
+    elseif strcmp(env_enable_vis, '1') || strcmp(env_enable_vis, 'true')
+        enable_visualization = true;
+    end
 
     % ArUco landing pad configuration
     use_aruco_landing_pad = true;
@@ -62,11 +83,13 @@ function AutoLandingMainFull(varargin)
     aruco_visibility_poll_interval_s = 2.0;
     aruco_visibility_min_markers = 1;
     spawn_layout_mode = 'auto';          % auto = square-ish, square = near-square, rectangle = wider rectangle
-    spawn_layout_spacing_m = 12.2;        % Tighter spacing so drones stay near the central landing pad
+    spawn_layout_spacing_m = 9.2;        % Tighter spacing so drones stay near the central landing pad
     spawn_layout_center_xy = landing_pad_center(1:2);
     mavlink_init_timeout_s = 120.0;     % Startup heartbeat readiness budget (seconds)
     mavlink_poll_interval_s = 1.0;      % Polling interval for startup heartbeat checks
+    mavros_state_ready_timeout_s = 90.0; % Wait budget for /mavros_w*/state connected=true readiness
     sitl_json_ready_timeout_s = 90.0;   % Wait budget for SITL JSON sensor bridge readiness
+    strict_startup_gate = true;         % If true, never start collection in degraded fallback-only mode
 
     % Train/Validation Split
     total_training_samples = 20;         % Total samples for training (including both train+val)
@@ -75,9 +98,29 @@ function AutoLandingMainFull(varargin)
     % Model Configuration
     use_ontology_model = true;          % Train ontology+AI hybrid model
     use_pure_ai_model = true;           % Train pure AI baseline model
+
+    env_enable_ontology = lower(strtrim(getenv('AUTOLANDING_ENABLE_ONTOLOGY_MODEL')));
+    if strcmp(env_enable_ontology, '0') || strcmp(env_enable_ontology, 'false')
+        use_ontology_model = false;
+    elseif strcmp(env_enable_ontology, '1') || strcmp(env_enable_ontology, 'true')
+        use_ontology_model = true;
+    end
+    env_enable_pure_ai = lower(strtrim(getenv('AUTOLANDING_ENABLE_PURE_AI_MODEL')));
+    if strcmp(env_enable_pure_ai, '0') || strcmp(env_enable_pure_ai, 'false')
+        use_pure_ai_model = false;
+    elseif strcmp(env_enable_pure_ai, '1') || strcmp(env_enable_pure_ai, 'true')
+        use_pure_ai_model = true;
+    end
     
     % Visualization
     enable_plots = true;                % Generate comparison plots
+
+    env_enable_plots = lower(strtrim(getenv('AUTOLANDING_ENABLE_PLOTS')));
+    if strcmp(env_enable_plots, '0') || strcmp(env_enable_plots, 'false')
+        enable_plots = false;
+    elseif strcmp(env_enable_plots, '1') || strcmp(env_enable_plots, 'true')
+        enable_plots = true;
+    end
     
     %% ============ DERIVED PARAMETERS (auto-calculated) ============
     
@@ -111,7 +154,7 @@ function AutoLandingMainFull(varargin)
     fprintf('    - ArUco Markers Topic: %s\n', aruco_markers_topic);
     fprintf('    - ArUco Visibility Poll: %.1fs every %.1fs (%d marker minimum)\n', ...
         aruco_visibility_probe_timeout_s, aruco_visibility_poll_interval_s, aruco_visibility_min_markers);
-    fprintf('    - RViz Monitor: %s (ROS_DOMAIN_ID=%s)\n', char(string(enable_rviz_monitor)), char(string(ros_domain_id)));
+    fprintf('    - RViz Monitor: %s (ROS domain: environment default)\n', char(string(enable_rviz_monitor)));
     fprintf('    - Landing Pad Center: [%.2f, %.2f, %.2f]\n', landing_pad_center(1), landing_pad_center(2), landing_pad_center(3));
     fprintf('    - Landing Pad Size: [%.2f x %.2f] m\n', landing_pad_size(1), landing_pad_size(2));
     fprintf('    - Formation Layout: %s\n', char(string(spawn_layout_mode)));
@@ -189,80 +232,62 @@ function AutoLandingMainFull(varargin)
             autlAssertDroneIncludeCount(world_path_to_launch, num_workers);
         end
 
-        launch_world_dir = fileparts(world_path_to_launch);
-        launch_world_name = world_path_to_launch;
-        display_env = getenv('DISPLAY');
-        if strlength(string(display_env)) == 0
-            display_env = ':0';
+        % Use Python-based Gazebo launcher (ensures /tmp is in model search path for dynamic variants)
+        % This fixes the I1/I2 JSON readiness issue where Gazebo couldn't find iris_with_gimbal_w* models
+        launch_gazebo_py = fullfile(rootDir, 'scripts', 'launch_gazebo_py.py');
+        if ~isfile(launch_gazebo_py)
+            error('[Pipeline] Gazebo Python launcher not found: %s. Make sure scripts/launch_gazebo_py.py exists.', launch_gazebo_py);
         end
-        xauth_env = getenv('XAUTHORITY');
 
-        % Resource path is required so model:// URIs resolve (iris_with_gimbal, ArUco, ...)
-        gz_resource_path = sprintf('%s:%s:%s:%s:%s', gazebo_pkg_dir, fullfile(gazebo_pkg_dir, 'models'), world_dir, ...
-            launch_world_dir, fullfile(aruco_pkg_dir, 'gz-world'));
-        gz_system_plugin_path = fullfile(gazebo_pkg_dir, 'build');
-        gz_clean_env = 'unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME;';
-        xauth_export = '';
-        if strlength(string(xauth_env)) > 0
-            xauth_export = sprintf('export XAUTHORITY="%s";', xauth_env);
+        if gazebo_server_mode
+            fprintf('[Pipeline] Starting Gazebo (server mode, Python launcher)...\n');
+            gazebo_gui_flag = '--headless';
+        else
+            fprintf('[Pipeline] Starting Gazebo (GUI mode, Python launcher)...\n');
+            gazebo_gui_flag = '';
+            display_env = getenv('DISPLAY');
+            if strlength(string(display_env)) == 0
+                setenv('DISPLAY', ':0');
+            else
+                setenv('DISPLAY', display_env);
+            end
         end
         
-        if gazebo_server_mode
-            fprintf('[Pipeline] Starting Gazebo (server mode)...\n');
-            gz_cmd = sprintf('bash -lc ''%s export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; cd "%s" && setsid gz sim -s -v4 -r "%s" </dev/null > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
-        else
-            fprintf('[Pipeline] Starting Gazebo (GUI mode)...\n');
-            fprintf('[Pipeline] Display: %s\n', display_env);
-            gz_cmd = sprintf('bash -lc ''%s export DISPLAY="%s"; %s export QT_QPA_PLATFORM=xcb; export GZ_SIM_SYSTEM_PLUGIN_PATH="%s:${GZ_SIM_SYSTEM_PLUGIN_PATH}"; export GZ_SIM_RESOURCE_PATH="%s"; xhost +local: 2>/dev/null || true; cd "%s" && setsid gz sim -v4 -r "%s" </dev/null > /tmp/gz_sim.log 2>&1 &''', gz_clean_env, display_env, xauth_export, gz_system_plugin_path, gz_resource_path, launch_world_dir, launch_world_name);
-            fprintf('[Pipeline] Launch command: cd %s && gz sim -v4 -r %s\n', launch_world_dir, launch_world_name);
-        end
+        % Sanitize environment before launching Gazebo (prevent Qt library conflicts)
+        % MATLAB's LD_LIBRARY_PATH can conflict with system Gazebo Qt libraries
+        gz_env_cmd = 'unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; ';
+        gz_cmd = sprintf('bash -lc ''%s python3 "%s" --world "%s" %s --verbose &''', gz_env_cmd, launch_gazebo_py, world_path_to_launch, gazebo_gui_flag);
         system(gz_cmd);
 
         % Give Gazebo time to load plugins before process checks
-        pause(2);
+        pause(3);
 
-        % Detect known Qt symbol mismatch from inherited MATLAB environment
-        [qt_err_status, ~] = system('grep -E "Library error for|libQt5Quick|Qt_5_PRIVATE_API" /tmp/gz_sim.log > /dev/null 2>&1');
-        if qt_err_status == 0
-            fprintf('[Pipeline] ERROR: Gazebo failed due to Qt library conflict. Last log lines:\n');
-            system('tail -n 40 /tmp/gz_sim.log');
-            error(['Gazebo GUI failed from Qt conflict (MATLAB runtime libs vs system Qt). ', ...
-                   'The launcher now sanitizes LD_LIBRARY_PATH/QT_* vars; rerun with clear functions and AutoLandingMainFull(''gui'').']);
-        end
-
-        % Verify Gazebo actually started before moving on
+        % Verify Gazebo actually started
         [gz_status, ~] = system('pgrep -f "gz sim" > /dev/null');
         if gz_status ~= 0
             fprintf('[Pipeline] ERROR: Gazebo failed to start. Last log lines:\n');
             system('tail -n 20 /tmp/gz_sim.log');
             error('Gazebo startup failed.');
         end
-
-        % In GUI mode, ensure GUI process is alive (not server-only fallback)
-        if ~gazebo_server_mode
-            pause(1);
-            [gui_status, ~] = system('pgrep -f "gz sim gui" > /dev/null');
-            if gui_status ~= 0
-                fprintf('[Pipeline] ERROR: Gazebo GUI process not detected. Last log lines:\n');
-                system('tail -n 30 /tmp/gz_sim.log');
-                error('Gazebo GUI did not start. Check DISPLAY and GZ_SIM_RESOURCE_PATH.');
-            end
-        end
+        
         pause(5);
         
-        % Start ArduPilot SITL (single or multi-drone)
+        % Start ArduPilot SITL using Python launcher (no shell script dependencies)
         fprintf('[Pipeline] Starting ArduPilot SITL...\n');
-        if enable_multi_drone_profiles
-            launch_multi_sitl = fullfile(rootDir, 'scripts', 'launch_multi_drone_sitl.sh');
-            if isfile(launch_multi_sitl)
-                ap_cmd = sprintf('bash -lc ''setsid "%s" %d </dev/null > /tmp/autolanding_multi_sitl.log 2>&1 &''', launch_multi_sitl, num_workers);
-            else
-                warning('Multi-drone SITL launcher not found: %s. Falling back to single instance.', launch_multi_sitl);
-                ap_cmd = sprintf('nohup setsid $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 </dev/null > /tmp/ardupilot_sitl.log 2>&1 &');
-            end
-        else
-            ap_cmd = sprintf('nohup setsid $HOME/ardupilot/build/sitl/bin/arducopter --model JSON --speedup 1 --slave 0 --defaults $HOME/ardupilot/Tools/autotest/default_params/copter.parm,$HOME/ardupilot/Tools/autotest/default_params/gazebo-iris.parm --sim-address=127.0.0.1 -I0 </dev/null > /tmp/ardupilot_sitl.log 2>&1 &');
+        launch_sitl_py = fullfile(rootDir, 'scripts', 'launch_multi_drone_py.py');
+        if ~isfile(launch_sitl_py)
+            error('[Pipeline] SITL Python launcher not found: %s. Make sure scripts/launch_multi_drone_py.py exists.', launch_sitl_py);
         end
+        
+        if enable_multi_drone_profiles
+            sitl_count = num_workers;
+        else
+            sitl_count = 1;
+        end
+        
+        % Sanitize environment before launching SITL
+        sitl_env_cmd = 'unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; ';
+        ap_cmd = sprintf('bash -lc ''%s python3 "%s" --count %d --speedup 1 &''', sitl_env_cmd, launch_sitl_py, sitl_count);
         system(ap_cmd);
         pause(5);
         
@@ -279,16 +304,45 @@ function AutoLandingMainFull(varargin)
 
         fprintf('[Pipeline] ArUco topic pre-check deferred until RViz/bridge launch completes\n');
 
-        resolved_ros_domain_id = autlResolveRosDomainId(ros_domain_id);
-        setenv('ROS_DOMAIN_ID', resolved_ros_domain_id);
-        fprintf('[Pipeline] ROS domain resolved for MATLAB/workers: %s\n', resolved_ros_domain_id);
+        % Always allow SERIAL0 bootstrap nudge here. In MAVROS mode, the bridge is
+        % launched after this check, so disabling nudge can deadlock I1+/I2+ at
+        % "Waiting for connection ...." and keep JSON readiness in WAIT forever.
+        json_probe_nudge = true;
+        [json_ready, json_report, json_ready_instances] = autlWaitForSitlJsonReady(num_workers, enable_multi_drone_profiles, sitl_json_ready_timeout_s, json_probe_nudge);
+        fprintf('%s', json_report);
+        if ~json_ready
+            fprintf('[Pipeline] WARNING: SITL JSON bridge is not ready.\n');
+            fprintf('[Pipeline] WARNING: Check /tmp/autolanding_sitl/arducopter_I*.log and /tmp/gz_sim.log for sensor path/port conflicts.\n');
+
+            % If at least one lower-index worker is JSON-ready, continue with reduced worker count.
+            if enable_multi_drone_profiles && ~isempty(json_ready_instances)
+                ready_count = numel(json_ready_instances);
+                expected_seq = 0:(ready_count - 1);
+                if isequal(json_ready_instances, expected_seq)
+                    if ready_count < num_workers
+                        fprintf('[Pipeline] PARTIAL JSON READY: reducing active workers from %d to %d (instances: %s).\n', ...
+                            num_workers, ready_count, mat2str(json_ready_instances));
+                    end
+                    num_workers = ready_count;
+                    if ~isempty(worker_profiles) && numel(worker_profiles) >= ready_count
+                        worker_profiles = worker_profiles(1:ready_count);
+                    end
+                    json_ready = true;
+                end
+            end
+
+            if ~json_ready
+                fprintf('[Pipeline] WARNING: Continuing in fallback-only mode.\n');
+                force_fallback_only_mode = true;
+            end
+        end
 
         if strcmpi(control_backend, 'mavros') && auto_launch_mavros_bridge
-            autlLaunchMavrosBridge(rootDir, resolved_ros_domain_id, num_workers, mavros_namespace_prefix);
+            autlLaunchMavrosBridge(rootDir, num_workers, mavros_namespace_prefix);
         end
 
         if enable_rviz_monitor
-            autlLaunchRvizMonitor(rootDir, ros_domain_id, num_workers);
+            autlLaunchRvizMonitor(rootDir, num_workers);
 
             aruco_wait_t0 = tic;
             aruco_wait_timeout_s = 12.0;
@@ -312,21 +366,40 @@ function AutoLandingMainFull(varargin)
             fprintf('[Pipeline] RViz monitor disabled: skipping /aruco_markers availability check\n');
         end
 
-        % Wait for JSON bridge readiness markers in SITL logs before heartbeat probes.
-        [json_ready, json_report] = autlWaitForSitlJsonReady(num_workers, enable_multi_drone_profiles, sitl_json_ready_timeout_s);
-        fprintf('%s', json_report);
-        if ~json_ready
-            error(['SITL JSON bridge is not ready. Check /tmp/autolanding_sitl/arducopter_I*.log and ' ...
-                   '/tmp/gz_sim.log for sensor path/port conflicts.']);
+        % MAVROS state readiness check (in strict mode, this is the primary gate).
+        mavros_state_ok = true;
+        if strcmpi(control_backend, 'mavros')
+            [mavros_state_ok, mavros_report] = autlVerifyMavrosStateReady(num_workers, enable_multi_drone_profiles, ...
+                mavros_namespace_prefix, mavros_state_ready_timeout_s, mavlink_poll_interval_s);
+            fprintf('%s', mavros_report);
+            if ~mavros_state_ok
+                fprintf('[Pipeline] WARNING: MAVROS state topic is not connected on one or more workers. Continuing in fallback-only mode.\n');
+                fprintf('%s', autlCollectMavrosStartupDiagnostics(num_workers, enable_multi_drone_profiles, mavros_namespace_prefix));
+                force_fallback_only_mode = true;
+            end
         end
 
-        % Fail fast if MAVLink heartbeat is unavailable before parallel workers start.
+        % Secondary check: MAVLink heartbeat visibility. In MAVROS mode, state-topic
+        % connectivity is the primary strict gate.
         [mav_ok, mav_report] = autlVerifyMavlinkHeartbeatReady(num_workers, enable_multi_drone_profiles, ...
-            mavlink_init_timeout_s, mavlink_poll_interval_s);
+            mavlink_init_timeout_s, mavlink_poll_interval_s, ~strict_startup_gate);
         fprintf('%s', mav_report);
         if ~mav_ok
-            error(['MAVLink endpoints are not ready. Check /tmp/autolanding_sitl/arducopter_I*.log and ' ...
-                   '/tmp/gz_sim.log for JSON sensor bridge or port-client conflicts.']);
+            if strcmpi(control_backend, 'mavros') && mavros_state_ok
+                fprintf('[Pipeline] WARNING: MAVLink heartbeat probe not ready yet, but MAVROS state is connected=true. Proceeding.\n');
+            else
+                fprintf('[Pipeline] WARNING: MAVLink endpoints are not ready. Continuing in fallback-only mode.\n');
+                fprintf('[Pipeline] WARNING: Check /tmp/autolanding_sitl/arducopter_I*.log and /tmp/gz_sim.log for JSON sensor bridge or port-client conflicts.\n');
+                force_fallback_only_mode = true;
+            end
+        end
+        if force_fallback_only_mode
+            if strict_startup_gate
+                error(['[Pipeline] STARTUP GATE FAILED: MAVROS state topic / FCU link / SITL JSON not ready. ', ...
+                    'Refusing to start collection in fallback-only mode.']);
+            else
+                fprintf('[Pipeline] Degraded mode: MAVLink auto-motion disabled, using Gazebo set_pose fallback for collection.\n');
+            end
         end
         fprintf('[Pipeline] ✓ Simulation environment ready\n');
         
@@ -334,7 +407,8 @@ function AutoLandingMainFull(varargin)
         fprintf('\n[Pipeline] STEP 1: Parallel Data Collection\n');
         fprintf('════════════════════════════════════════════\n');
         mission_overrides = struct();
-        mission_overrides.enable_auto_motion = enable_auto_motion;
+        mission_overrides.enable_auto_motion = enable_auto_motion && ~force_fallback_only_mode;
+        mission_overrides.require_mavlink_for_auto_motion = mission_overrides.enable_auto_motion;
         mission_overrides.control_backend = control_backend;
         mission_overrides.control_backend_fallback = control_backend_fallback;
         mission_overrides.mavros_namespace = mavros_namespace;
@@ -349,10 +423,16 @@ function AutoLandingMainFull(varargin)
         mission_overrides.aruco_visibility_min_markers = aruco_visibility_min_markers;
         mission_overrides.telemetry_query_interval_s = 2.0;
         mission_overrides.control_interval_s = 2.0;
-        mission_overrides.mavlink_precheck_timeout_s = 30.0;
-        mission_overrides.mavlink_control_timeout_s = 30.0;
+        mission_overrides.mavlink_precheck_timeout_s = 6.0;
+        mission_overrides.mavlink_control_timeout_s = 6.0;
         mission_overrides.mavlink_ready_timeout_s = 10.0;
         mission_overrides.mavlink_ready_poll_interval_s = 0.8;
+        mission_overrides.require_state_topic_before_start = true;
+        mission_overrides.state_topic_timeout_s = 20.0;
+        mission_overrides.require_takeoff_confirmation_before_collection = true;
+        mission_overrides.takeoff_confirm_timeout_s = 25.0;
+        mission_overrides.takeoff_confirm_alt_ratio = 0.6;
+        mission_overrides.reject_fallback_only_mode = true;
         mission_overrides.reset_pose_each_scenario = true;
         mission_overrides.reset_spawn_xy = spawn_xy;
         mission_overrides.reset_spawn_z_m = 0.195;
@@ -411,9 +491,16 @@ function AutoLandingMainFull(varargin)
         %% STEP 5: Model Comparison and Analysis
         fprintf('\n[Pipeline] STEP 4: Model Comparison and Analysis\n');
         fprintf('════════════════════════════════════════════\n');
-        
-        comparison_result = autlCompareModels(model_onto_ai, model_pure_ai, X_val, y_val, ...
-                                              use_ontology_model, use_pure_ai_model);
+        try
+            comparison_result = autlCompareModels(model_onto_ai, model_pure_ai, X_val, y_val, ...
+                                                  use_ontology_model, use_pure_ai_model);
+        catch ME_cmp
+            warning('[Pipeline] Model comparison failed, continuing with fallback summary: %s', ME_cmp.message);
+            comparison_result = struct();
+            comparison_result.models = {};
+            comparison_result.metrics = {};
+            comparison_result.summary_text = sprintf('MODEL COMPARISON SKIPPED: %s', ME_cmp.message);
+        end
         
         fprintf('\n%s\n', comparison_result.summary_text);
         
@@ -698,20 +785,14 @@ for i = 1:num_drones
         end
         if isfield(p, 'reset_model_name')
             name_i = char(string(p.reset_model_name));
-        elseif i == 1
-            name_i = 'iris_with_gimbal';
         else
-            name_i = sprintf('iris_with_gimbal_%d', i - 1);
+            name_i = sprintf('iris_with_gimbal_w%d', i);
         end
     else
         ang_i = deg2rad(spawn_yaw_deg + 18.0 * (i - 1));
         spawn_i = [spawn_xy(1) + 0.35 * cos(ang_i), spawn_xy(2) + 0.35 * sin(ang_i)];
         yaw_i = spawn_yaw_deg;
-        if i == 1
-            name_i = 'iris_with_gimbal';
-        else
-            name_i = sprintf('iris_with_gimbal_%d', i - 1);
-        end
+        name_i = sprintf('iris_with_gimbal_w%d', i);
     end
 
     fdm_port_in_i = 9002 + 10 * (i - 1);
@@ -880,18 +961,21 @@ sdf_text = strrep(sdf_text, 'model://gimbal_small_3d', sprintf('model://%s', gim
 % breaking SDF frame graph resolution for included models.
 sdf_text = regexprep(sdf_text, '<fdm_addr>\s*[^<]+\s*</fdm_addr>', sprintf('<fdm_addr>%s</fdm_addr>', fdm_addr), 'once');
 sdf_text = regexprep(sdf_text, '<fdm_port_in>\s*\d+\s*</fdm_port_in>', sprintf('<fdm_port_in>%d</fdm_port_in>', fdm_port_in), 'once');
-% fdm_port_out is deprecated in recent ArduPilotPlugin builds and may add
-% noisy reconnect behavior; remove it if present and rely on auto-detection.
-sdf_text = regexprep(sdf_text, '\s*<fdm_port_out>\s*\d+\s*</fdm_port_out>\s*', '\n', 'once');
+% Keep per-worker output port unique too; removing this field can make
+% multiple models contend for the same default and starve I1+/I2+ JSON feeds.
+if ~isempty(regexp(sdf_text, '<fdm_port_out>\s*\d+\s*</fdm_port_out>', 'once'))
+    sdf_text = regexprep(sdf_text, '<fdm_port_out>\s*\d+\s*</fdm_port_out>', sprintf('<fdm_port_out>%d</fdm_port_out>', fdm_port_out), 'once');
+else
+    sdf_text = regexprep(sdf_text, '(<fdm_port_in>\s*\d+\s*</fdm_port_in>)', ...
+        sprintf('$1\n      <fdm_port_out>%d</fdm_port_out>', fdm_port_out), 'once');
+end
+sdf_text = regexprep(sdf_text, '<imuName>\s*[^<]+\s*</imuName>', ...
+    '<imuName>iris_with_standoffs::imu_link::imu_sensor</imuName>', 'once');
 
-% Multi-instance startup can be staggered; allow longer controller handshake
-% before plugin-side timeout/reset to avoid intermittent no-JSON loops.
+% Preserve upstream defaults for timeout/lock-step behavior.
 sdf_text = regexprep(sdf_text, '<connectionTimeoutMaxCount>\s*\d+\s*</connectionTimeoutMaxCount>', ...
-    '<connectionTimeoutMaxCount>500</connectionTimeoutMaxCount>', 'once');
-
-% In multi-drone GUI runs, strict lock-step can starve some instances and
-% trigger controller reset/drained-packets loops; keep plugin asynchronous.
-sdf_text = regexprep(sdf_text, '<lock_step>\s*1\s*</lock_step>', '<lock_step>0</lock_step>', 'once');
+    '<connectionTimeoutMaxCount>5</connectionTimeoutMaxCount>', 'once');
+sdf_text = regexprep(sdf_text, '<lock_step>\s*0\s*</lock_step>', '<lock_step>1</lock_step>', 'once');
 
 fid = fopen(fullfile(variant_dir, 'model.sdf'), 'w');
 if fid < 0
@@ -943,11 +1027,7 @@ for i = 1:num_workers
     profiles(i).mavlink_master = sprintf('tcp:127.0.0.1:%d', 5760 + 10 * (i - 1));
     profiles(i).mavlink_master_fallback = sprintf('tcp:127.0.0.1:%d', 5762 + 10 * (i - 1));
     profiles(i).mavros_namespace = sprintf('/mavros_w%d', i);
-    if i == 1
-        profiles(i).reset_model_name = 'iris_with_gimbal';
-    else
-        profiles(i).reset_model_name = sprintf('iris_with_gimbal_%d', i - 1);
-    end
+    profiles(i).reset_model_name = sprintf('iris_with_gimbal_w%d', i);
     profiles(i).reset_spawn_xy = spawn_xy_i;
     profiles(i).reset_spawn_yaw_deg = yaw_i;
     profiles(i).takeoff_height_m = base_takeoff_height_m + 0.3 * (i - 1);
@@ -1069,27 +1149,22 @@ shifted_xy = double(points_xy) - center_xy_row;
 rotated_xy = shifted_xy * rotation_mat.' + center_xy_row;
 end
 
-function autlLaunchRvizMonitor(rootDir, ros_domain_id, num_workers)
-% Launch RViz monitor in background with robust local environment loading.
+function autlLaunchRvizMonitor(rootDir, num_workers)
+% Launch RViz monitoring stack using Python launcher (no shell script dependencies).
 
-launch_script = fullfile(rootDir, 'scripts', 'launch_rviz_monitor.sh');
-if ~isfile(launch_script)
-    fprintf('[Pipeline] WARNING: RViz launcher not found: %s\n', launch_script);
+launch_script_py = fullfile(rootDir, 'scripts', 'launch_rviz_monitor_py.py');
+if ~isfile(launch_script_py)
+    fprintf('[Pipeline] WARNING: RViz Python launcher not found: %s\n', launch_script_py);
     return;
 end
 
-if nargin < 2 || strlength(string(ros_domain_id)) == 0
-    ros_domain_id = 'auto';
-end
-if nargin < 3 || isempty(num_workers)
+if nargin < 2 || isempty(num_workers)
     num_workers = 1;
 end
 
-stop_cmd = sprintf('bash -lc ''bash "%s" --stop >/tmp/autolanding_rviz_stop.log 2>&1 || true''', launch_script);
-system(stop_cmd);
-
-cmd = sprintf('bash -lc ''nohup bash "%s" --domain "%s" --workers %d > /tmp/autolanding_rviz.log 2>&1 &''', ...
-    launch_script, char(string(ros_domain_id)), num_workers);
+% Sanitize environment before launching RViz (prevent Qt library conflicts)
+rviz_env_cmd = 'unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; ';
+cmd = sprintf('bash -lc ''%s python3 "%s" > /tmp/autolanding_rviz.log 2>&1 &''', rviz_env_cmd, launch_script_py);
 [rc, ~] = system(cmd);
 if rc == 0
     fprintf('[Pipeline] RViz monitor launch requested (log: /tmp/autolanding_rviz.log)\n');
@@ -1098,53 +1173,31 @@ else
 end
 end
 
-function autlLaunchMavrosBridge(rootDir, ros_domain_id, num_workers, namespace_prefix)
-% Launch worker-specific MAVROS nodes in the background.
+function autlLaunchMavrosBridge(rootDir, num_workers, namespace_prefix)
+% Launch worker-specific MAVROS nodes using Python launcher (no shell script dependencies).
 
-launch_script = fullfile(rootDir, 'scripts', 'launch_multi_mavros.sh');
-if ~isfile(launch_script)
-    fprintf('[Pipeline] WARNING: MAVROS launcher not found: %s\n', launch_script);
+launch_script_py = fullfile(rootDir, 'scripts', 'launch_multi_mavros_py.py');
+if ~isfile(launch_script_py)
+    fprintf('[Pipeline] WARNING: MAVROS Python launcher not found: %s\n', launch_script_py);
     return;
 end
 
-if nargin < 2 || strlength(string(ros_domain_id)) == 0
-    ros_domain_id = 'auto';
-end
-if nargin < 3 || isempty(num_workers)
+if nargin < 2 || isempty(num_workers)
     num_workers = 1;
 end
-if nargin < 4 || strlength(string(namespace_prefix)) == 0
+if nargin < 3 || strlength(string(namespace_prefix)) == 0
     namespace_prefix = '/mavros_w';
 end
 
-cmd = sprintf('bash -lc ''nohup bash "%s" --domain "%s" --workers %d --namespace-prefix "%s" > /tmp/autolanding_mavros_launcher.log 2>&1 &''', ...
-    launch_script, char(string(ros_domain_id)), num_workers, char(string(namespace_prefix)));
+% Sanitize environment before launching MAVROS
+mavros_env_cmd = 'unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; ';
+cmd = sprintf('bash -lc ''%s python3 "%s" --count %d --ns-prefix "%s" > /tmp/autolanding_mavros_launcher.log 2>&1 &''', ...
+    mavros_env_cmd, launch_script_py, num_workers, char(string(namespace_prefix)));
 [rc, ~] = system(cmd);
 if rc == 0
     fprintf('[Pipeline] MAVROS bridge launch requested (log: /tmp/autolanding_mavros_launcher.log)\n');
 else
     fprintf('[Pipeline] WARNING: Failed to launch MAVROS bridge (rc=%d)\n', rc);
-end
-end
-
-function domain_id = autlResolveRosDomainId(requested_domain_id)
-% Resolve ROS_DOMAIN_ID so MATLAB workers and RViz/bridge use the same value.
-
-if nargin < 1 || strlength(string(requested_domain_id)) == 0
-    requested_domain_id = 'auto';
-end
-
-requested = char(string(requested_domain_id));
-if ~strcmpi(requested, 'auto')
-    domain_id = requested;
-    return;
-end
-
-existing = getenv('ROS_DOMAIN_ID');
-if strlength(string(existing)) > 0
-    domain_id = char(string(existing));
-else
-    domain_id = '0';
 end
 end
 
@@ -1167,7 +1220,7 @@ if actual_count ~= expected_workers
 end
 end
 
-function [all_ready, report_text] = autlVerifyMavlinkHeartbeatReady(num_workers, multi_drone_enabled, deadline_s, poll_s)
+function [all_ready, report_text] = autlVerifyMavlinkHeartbeatReady(num_workers, multi_drone_enabled, deadline_s, poll_s, allow_tcp_fallback)
 % Verify heartbeat availability on expected MAVLink endpoints before data collection.
 
 if nargin < 1 || isempty(num_workers)
@@ -1181,6 +1234,9 @@ if nargin < 3 || isempty(deadline_s)
 end
 if nargin < 4 || isempty(poll_s)
     poll_s = 1.5;
+end
+if nargin < 5
+    allow_tcp_fallback = true;
 end
 
 if multi_drone_enabled
@@ -1242,7 +1298,7 @@ while toc(start_t) < deadline_s && ~all(ready_flags)
 
     % Early fallback: if heartbeat is still delayed but all worker MAVLink TCP ports are open,
     % proceed after a short grace period instead of waiting for full timeout budget.
-    if elapsed_s >= tcp_fallback_grace_s && ~all(ready_flags)
+    if allow_tcp_fallback && elapsed_s >= tcp_fallback_grace_s && ~all(ready_flags)
         open_now = true;
         for k = 1:numel(target_workers)
             if ready_flags(k)
@@ -1313,7 +1369,7 @@ end
 
 if all_ready
     line_buf(end+1) = "[Pipeline] MAVLink readiness check: PASS";
-elseif all(tcp_open_flags)
+elseif allow_tcp_fallback && all(tcp_open_flags)
     % Some environments delay/omit heartbeat at startup while endpoints are already reachable.
     % Allow pipeline to continue; worker-level control still performs per-call readiness checks.
     all_ready = true;
@@ -1321,6 +1377,195 @@ elseif all(tcp_open_flags)
     line_buf(end+1) = "[Pipeline] MAVLink readiness check: PASS (TCP fallback)";
 else
     line_buf(end+1) = "[Pipeline] MAVLink readiness check: FAIL";
+end
+
+report_text = sprintf('%s\n', line_buf{:});
+end
+
+function [all_ready, report_text] = autlVerifyMavrosStateReady(num_workers, multi_drone_enabled, namespace_prefix, deadline_s, poll_s)
+% Verify /mavros_w*/state is published and connected=true before collection.
+
+if nargin < 1 || isempty(num_workers)
+    num_workers = 1;
+end
+if nargin < 2
+    multi_drone_enabled = false;
+end
+if nargin < 3 || strlength(string(namespace_prefix)) == 0
+    namespace_prefix = '/mavros_w';
+end
+if nargin < 4 || isempty(deadline_s)
+    deadline_s = 40.0;
+end
+if nargin < 5 || isempty(poll_s)
+    poll_s = 1.0;
+end
+
+if multi_drone_enabled
+    target_workers = 1:max(1, round(num_workers));
+else
+    target_workers = 1;
+end
+
+all_ready = true;
+ready_flags = false(size(target_workers));
+last_status = strings(size(target_workers));
+line_buf = strings(0, 1);
+line_buf(end+1) = "[Pipeline] MAVROS state readiness check (connected=true)...";
+
+progress_last_t = -inf;
+progress_interval_s = 5.0;
+start_t = tic;
+
+while toc(start_t) < deadline_s && ~all(ready_flags)
+    drawnow limitrate;
+    for idx = 1:numel(target_workers)
+        if ready_flags(idx)
+            continue;
+        end
+
+        worker_id = target_workers(idx);
+        ns = sprintf('%s%d', char(string(namespace_prefix)), worker_id);
+        topic = sprintf('%s/state', ns);
+
+        cmd_echo = sprintf('bash -lc ''timeout 2 ros2 topic echo --once "%s" 2>/dev/null''', topic);
+        [st, out] = system(cmd_echo);
+        out_l = lower(char(string(out)));
+        if st == 0 && contains(out_l, 'connected: true')
+            ready_flags(idx) = true;
+            line_buf(end+1) = sprintf('[Pipeline]   Worker %d state READY (%s connected=true)', worker_id, topic);
+            continue;
+        end
+
+        if st == 0 && contains(out_l, 'connected: false')
+            last_status(idx) = 'connected=false';
+        else
+            cmd_list = sprintf('bash -lc ''timeout 2 ros2 topic list 2>/dev/null | grep -E "^%s$" > /dev/null''', topic);
+            if system(cmd_list) == 0
+                last_status(idx) = 'topic exists but no connected=true yet';
+            else
+                last_status(idx) = 'state topic not visible';
+            end
+        end
+    end
+
+    elapsed_s = toc(start_t);
+    if (elapsed_s - progress_last_t) >= progress_interval_s
+        progress_last_t = elapsed_s;
+        status_parts = strings(1, numel(target_workers));
+        for k = 1:numel(target_workers)
+            worker_id = target_workers(k);
+            if ready_flags(k)
+                status_parts(k) = sprintf('W%d=CONNECTED', worker_id);
+            else
+                status_parts(k) = sprintf('W%d=WAIT', worker_id);
+            end
+        end
+        fprintf('[Pipeline] MAVROS state wait %.1fs/%.1fs [%s]\n', elapsed_s, deadline_s, strjoin(status_parts, ', '));
+    end
+
+    if ~all(ready_flags)
+        pause(poll_s);
+    end
+end
+
+for idx = 1:numel(target_workers)
+    if ~ready_flags(idx)
+        all_ready = false;
+        worker_id = target_workers(idx);
+        ns = sprintf('%s%d', char(string(namespace_prefix)), worker_id);
+        topic = sprintf('%s/state', ns);
+        detail = char(string(last_status(idx)));
+        if strlength(string(detail)) == 0
+            detail = 'connected=true not observed';
+        end
+        line_buf(end+1) = sprintf('[Pipeline]   Worker %d state NOT READY after %.1fs (%s: %s)', ...
+            worker_id, deadline_s, topic, detail);
+    end
+end
+
+if all_ready
+    line_buf(end+1) = "[Pipeline] MAVROS state readiness check: PASS";
+else
+    line_buf(end+1) = "[Pipeline] MAVROS state readiness check: FAIL";
+end
+
+report_text = sprintf('%s\n', line_buf{:});
+end
+
+function report_text = autlCollectMavrosStartupDiagnostics(num_workers, multi_drone_enabled, namespace_prefix)
+% Collect actionable MAVROS diagnostics when startup state gate fails.
+
+if nargin < 1 || isempty(num_workers)
+    num_workers = 1;
+end
+if nargin < 2
+    multi_drone_enabled = false;
+end
+if nargin < 3 || strlength(string(namespace_prefix)) == 0
+    namespace_prefix = '/mavros_w';
+end
+
+if multi_drone_enabled
+    target_workers = 1:max(1, round(num_workers));
+else
+    target_workers = 1;
+end
+
+line_buf = strings(0, 1);
+line_buf(end+1) = "[Pipeline] MAVROS startup diagnostics:";
+
+for idx = 1:numel(target_workers)
+    worker_id = target_workers(idx);
+    ns = sprintf('%s%d', char(string(namespace_prefix)), worker_id);
+    topic = sprintf('%s/state', ns);
+    log_file = sprintf('/tmp/autolanding_mavros_w%d.log', worker_id);
+
+    line_buf(end+1) = sprintf('[Pipeline]   Worker %d (%s)', worker_id, ns);
+
+    cmd_topic = sprintf('bash -lc ''timeout 2 ros2 topic list 2>/dev/null | grep -E "^%s$" > /dev/null''', topic);
+    if system(cmd_topic) == 0
+      line_buf(end+1) = sprintf('[Pipeline]     Topic visible: %s', topic);
+    else
+      line_buf(end+1) = sprintf('[Pipeline]     Topic missing: %s', topic);
+    end
+
+    cmd_echo = sprintf('bash -lc ''timeout 2 ros2 topic echo --once "%s" 2>/dev/null''', topic);
+    [st_echo, out_echo] = system(cmd_echo);
+    out_l = lower(char(string(out_echo)));
+    if st_echo == 0
+        if contains(out_l, 'connected: true')
+            line_buf(end+1) = '[Pipeline]     State sample: connected=true';
+        elseif contains(out_l, 'connected: false')
+            line_buf(end+1) = '[Pipeline]     State sample: connected=false';
+        else
+            line_buf(end+1) = '[Pipeline]     State sample: no connected field parsed';
+        end
+    else
+        line_buf(end+1) = '[Pipeline]     State sample: unavailable';
+    end
+
+    cmd_node = sprintf('bash -lc ''timeout 2 ros2 node list 2>/dev/null | grep -E "^%s($|/)" || true''', ns);
+    [~, out_node] = system(cmd_node);
+    if strlength(strtrim(string(out_node))) > 0
+        line_buf(end+1) = sprintf('[Pipeline]     Nodes: %s', strtrim(string(out_node)));
+    else
+        line_buf(end+1) = '[Pipeline]     Nodes: none under namespace';
+    end
+
+    cmd_log = sprintf('bash -lc ''if [ -f "%s" ]; then tail -n 40 "%s" | egrep -i "fcu|connected|error|warn|timeout|link|heartbeat" | tail -n 8; fi''', log_file, log_file);
+    [~, out_log] = system(cmd_log);
+    if strlength(strtrim(string(out_log))) > 0
+        log_lines = splitlines(string(out_log));
+        for k = 1:numel(log_lines)
+            ln = strtrim(log_lines(k));
+            if strlength(ln) > 0
+                line_buf(end+1) = sprintf('[Pipeline]     MAVROS log: %s', ln);
+            end
+        end
+    else
+        line_buf(end+1) = sprintf('[Pipeline]     MAVROS log: no recent FCU/error lines (%s)', log_file);
+    end
 end
 
 report_text = sprintf('%s\n', line_buf{:});
@@ -1339,7 +1584,7 @@ cmd = sprintf([ ...
 is_open = (system(cmd) == 0);
 end
 
-function [all_ready, report_text] = autlWaitForSitlJsonReady(num_workers, multi_drone_enabled, timeout_s)
+function [all_ready, report_text, ready_instances] = autlWaitForSitlJsonReady(num_workers, multi_drone_enabled, timeout_s, enable_serial0_nudge)
 % Wait until each required SITL instance reports JSON sensor data reception.
 
 if nargin < 1 || isempty(num_workers)
@@ -1350,6 +1595,9 @@ if nargin < 2
 end
 if nargin < 3 || isempty(timeout_s)
     timeout_s = 30.0;
+end
+if nargin < 4
+    enable_serial0_nudge = true;
 end
 
 if multi_drone_enabled
@@ -1378,7 +1626,7 @@ while toc(start_t) < timeout_s
         log_file = sprintf('/tmp/autolanding_sitl/arducopter_I%d.log', instance_id);
 
         elapsed_s = toc(start_t);
-        if (elapsed_s - bootstrap_last_t(idx)) >= bootstrap_retry_s
+        if enable_serial0_nudge && (elapsed_s - bootstrap_last_t(idx)) >= bootstrap_retry_s
             autlNudgeSitlSerial0(instance_id);
             bootstrap_last_t(idx) = elapsed_s;
         end
@@ -1418,6 +1666,7 @@ while toc(start_t) < timeout_s
 end
 
 all_ready = all(ready_flags);
+ready_instances = target_instances(ready_flags);
 for idx = 1:numel(target_instances)
     instance_id = target_instances(idx);
     log_file = sprintf('/tmp/autolanding_sitl/arducopter_I%d.log', instance_id);
@@ -1460,7 +1709,6 @@ try
     
     % Kill background processes to prevent port conflicts
     system('pkill -f "gz sim" 2>/dev/null');
-    system('pkill -f "arducopter" 2>/dev/null');
     system('pkill -f "mavproxy.py" 2>/dev/null');
     system('pkill -f "ros_gz_bridge parameter_bridge" 2>/dev/null');
     system('pkill -f "ros2_aruco" 2>/dev/null');

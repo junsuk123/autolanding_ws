@@ -30,7 +30,7 @@ if use_onto && ~isempty(model_onto_ai)
         if isfield(model_onto_ai, 'is_nn') && model_onto_ai.is_nn
             y_pred_onto = autlPredictHybrid(model_onto_ai, X_val);
         else
-            y_pred_onto = predict(model_onto_ai.classifier, X_val);
+            y_pred_onto = autlSafePredictLabels(model_onto_ai.classifier, X_val, size(y_val, 1));
         end
     end
 end
@@ -39,7 +39,7 @@ if use_pure && ~isempty(model_pure_ai)
     if isfield(model_pure_ai, 'y_pred_val')
         y_pred_pure = model_pure_ai.y_pred_val;
     else
-        y_pred_pure = predict(model_pure_ai.classifier, X_val);
+        y_pred_pure = autlSafePredictLabels(model_pure_ai.classifier, X_val, size(y_val, 1));
     end
 end
 
@@ -130,5 +130,46 @@ if numel(metrics) >= 2
 end
 
 summary = sprintf('%s%s\n', summary, repmat('=', 1, 60));
+
+end
+
+function y_pred = autlSafePredictLabels(classifier, X_val, n_rows)
+% Safely run classifier prediction and normalize output to numeric 0/1 labels.
+
+y_pred = zeros(n_rows, 1);
+
+if isempty(classifier)
+    return;
+end
+
+try
+    y_raw = predict(classifier, X_val);
+catch ME
+    fprintf('[autlCompareModels] WARNING: predict failed (%s). Using all-zero fallback labels.\n', ME.message);
+    return;
+end
+
+if islogical(y_raw)
+    y_pred = double(y_raw(:));
+elseif isnumeric(y_raw)
+    y_pred = double(y_raw(:));
+elseif iscategorical(y_raw)
+    y_pred = double(string(y_raw) == "1");
+elseif isstring(y_raw) || ischar(y_raw) || iscellstr(y_raw)
+    y_pred = double(string(y_raw(:)) == "1");
+else
+    % Unknown label type; keep robust all-zero default.
+    return;
+end
+
+if numel(y_pred) ~= n_rows
+    y_pred = y_pred(1:min(end, n_rows));
+    if numel(y_pred) < n_rows
+        y_pred(end+1:n_rows, 1) = 0;
+    end
+end
+
+% Normalize arbitrary numeric labels to binary class labels.
+y_pred = double(y_pred > 0.5);
 
 end

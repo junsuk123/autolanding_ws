@@ -94,6 +94,10 @@ worker_config.enable_visualization = enable_visualization;  % Real-time monitori
 worker_config.mission_overrides = mission_overrides;
 worker_config.num_workers = num_workers;
 worker_config.progress_queue = [];
+worker_config.reject_fallback_only_mode = true;
+if isstruct(mission_overrides) && isfield(mission_overrides, 'reject_fallback_only_mode')
+    worker_config.reject_fallback_only_mode = logical(mission_overrides.reject_fallback_only_mode);
+end
 
 % Root cause guard:
 % parfor uses process workers, and process workers cannot reliably own desktop figure windows.
@@ -451,7 +455,6 @@ autlFlowLog(cleanup_flow_log, 'AutoLandingDataParallel.cleanup', 'cleanup_starte
 fprintf('[AutoLandingDataParallel.cleanup] Killing gazebo and ArduPilot processes...\n');
 try
     system('pkill -f "gz sim" 2>/dev/null');
-    system('pkill -f "arducopter" 2>/dev/null');
     system('pkill -f "mavproxy.py" 2>/dev/null');
     pause(0.5);
     fprintf('[AutoLandingDataParallel.cleanup] Processes terminated.\n');
