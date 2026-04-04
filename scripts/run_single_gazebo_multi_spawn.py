@@ -124,6 +124,191 @@ def _check_heartbeats(drone_count: int, timeout_each_s: int = 20) -> dict:
     return {'ok': ok, 'ports': results}
 
 
+def _run_state_change_check(port: int, target_alt_m: float = 3.0) -> dict:
+    item: dict = {'port': port, 'ok': False}
+    conn = None
+    try:
+        conn = mavutil.mavlink_connection(f'tcp:127.0.0.1:{port}', source_system=240)
+        hb = conn.wait_heartbeat(timeout=20)
+        if hb is None:
+            item['error'] = 'heartbeat timeout'
+            return item
+
+        try:
+            conn.mav.request_data_stream_send(
+                conn.target_system,
+                conn.target_component,
+                mavutil.mavlink.MAV_DATA_STREAM_ALL,
+                5,
+                1,
+            )
+        except Exception:
+            pass
+
+        pre_alt = 0.0
+        start_deadline = time.time() + 4.0
+        while time.time() < start_deadline:
+            msg = conn.recv_match(blocking=True, timeout=1)
+            if msg is not None:
+                if msg.get_type() == 'GLOBAL_POSITION_INT':
+                    pre_alt = float(getattr(msg, 'relative_alt', 0.0)) / 1000.0
+                    break
+                if msg.get_type() == 'VFR_HUD':
+                    pre_alt = float(getattr(msg, 'alt', 0.0))
+                    break
+
+        try:
+            conn.set_mode_apm('GUIDED')
+        except Exception:
+            pass
+
+        try:
+            conn.mav.command_long_send(
+                conn.target_system,
+                conn.target_component,
+                mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                0,
+                1,
+                21196,
+                0,
+                0,
+                0,
+                0,
+                0,
+            )
+        except Exception as exc:
+            item['error'] = f'arm send failed: {exc}'
+            return item
+
+        armed = False
+        arm_deadline = time.time() + 18.0
+        while time.time() < arm_deadline:
+            msg = conn.recv_match(type='HEARTBEAT', blocking=True, timeout=2)
+            if msg is None:
+                continue
+            armed = bool(getattr(msg, 'base_mode', 0) & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            if armed:
+                break
+
+        if not armed:
+            item['error'] = 'armed state not confirmed'
+            item['pre_alt_m'] = pre_alt
+            return item
+
+        try:
+            conn.mav.command_long_send(
+                conn.target_system,
+                conn.target_component,
+                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                float(target_alt_m),
+            )
+        except Exception as exc:
+            item['error'] = f'takeoff send failed: {exc}'
+            return item
+
+        post_alt = pre_alt
+        mode_seen = None
+        telemetry_samples: list[dict[str, object]] = []
+        fallback_used = False
+        deadline = time.time() + 35.0
+        while time.time() < deadline:
+            msg = conn.recv_match(blocking=True, timeout=2)
+            if msg is None:
+                continue
+            msg_type = msg.get_type()
+            if msg_type == 'GLOBAL_POSITION_INT':
+                post_alt = max(post_alt, float(getattr(msg, 'relative_alt', 0.0)) / 1000.0)
+                telemetry_samples.append({'type': msg_type, 'relative_alt_m': post_alt})
+            elif msg_type == 'VFR_HUD':
+                post_alt = max(post_alt, float(getattr(msg, 'alt', 0.0)))
+                telemetry_samples.append({'type': msg_type, 'alt_m': post_alt})
+            elif msg_type == 'HEARTBEAT':
+                mode_seen = mavutil.mode_string_v10(msg)
+                telemetry_samples.append({
+                    'type': msg_type,
+                    'armed': bool(getattr(msg, 'base_mode', 0) & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED),
+                    'mode': mode_seen,
+                })
+            if armed and post_alt >= pre_alt + 0.25:
+                break
+
+        if post_alt < pre_alt + 0.25:
+            fallback_used = True
+            climb_deadline = time.time() + 8.0
+            while time.time() < climb_deadline:
+                try:
+                    conn.mav.set_position_target_local_ned_send(
+                        0,
+                        conn.target_system,
+                        conn.target_component,
+                        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+                        0x0DC7,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        -0.8,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.2)
+
+            verify_deadline = time.time() + 15.0
+            while time.time() < verify_deadline:
+                msg = conn.recv_match(blocking=True, timeout=2)
+                if msg is None:
+                    continue
+                msg_type = msg.get_type()
+                if msg_type == 'GLOBAL_POSITION_INT':
+                    post_alt = max(post_alt, float(getattr(msg, 'relative_alt', 0.0)) / 1000.0)
+                    telemetry_samples.append({'type': msg_type, 'relative_alt_m': post_alt})
+                elif msg_type == 'VFR_HUD':
+                    post_alt = max(post_alt, float(getattr(msg, 'alt', 0.0)))
+                    telemetry_samples.append({'type': msg_type, 'alt_m': post_alt})
+                elif msg_type == 'HEARTBEAT':
+                    armed = bool(getattr(msg, 'base_mode', 0) & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                    mode_seen = mavutil.mode_string_v10(msg)
+                    telemetry_samples.append({'type': msg_type, 'armed': armed, 'mode': mode_seen})
+                if post_alt >= pre_alt + 0.25:
+                    break
+
+        item.update({
+            'ok': bool(armed and post_alt >= pre_alt + 0.25),
+            'pre_alt_m': pre_alt,
+            'post_alt_m': post_alt,
+            'armed': armed,
+            'mode_seen': mode_seen,
+            'telemetry_samples': telemetry_samples[-10:],
+            'fallback_used': fallback_used,
+        })
+        if not item['ok']:
+            item.setdefault('error', 'altitude did not rise enough after takeoff')
+        return item
+
+    except Exception as exc:
+        item['error'] = str(exc)
+        return item
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='Single Gazebo multi-spawn validator')
     parser.add_argument('--drone-count', type=int, default=3)
@@ -176,9 +361,11 @@ def main() -> int:
         time.sleep(16.0)
         topic_check = _check_topics(drone_count)
         hb_check = _check_heartbeats(drone_count, timeout_each_s=28)
+        state_change_check = _run_state_change_check(5760, target_alt_m=3.0)
         report['topic_check'] = topic_check
         report['heartbeat_check'] = hb_check
-        report['ok'] = bool(topic_check.get('ok'))
+        report['state_change_check'] = state_change_check
+        report['ok'] = bool(topic_check.get('ok') and state_change_check.get('ok'))
         if args.strict_heartbeat:
             report['ok'] = bool(report['ok'] and hb_check.get('ok'))
         report['strict_heartbeat'] = bool(args.strict_heartbeat)

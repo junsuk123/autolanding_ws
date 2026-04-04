@@ -8,6 +8,62 @@ import math
 from pathlib import Path
 
 
+ARDUPILOT_GAZEBO_MODELS = Path.home() / 'gz_ws' / 'src' / 'ardupilot_gazebo' / 'models'
+TMP_MODELS = Path('/tmp')
+
+
+def _variant_name(base_name: str, index: int) -> str:
+  return f'{base_name}_w{index}'
+
+
+def _prepare_model_variant(base_model: str, variant_model: str, replacements: dict[str, str]) -> None:
+  base_dir = ARDUPILOT_GAZEBO_MODELS / base_model
+  if not base_dir.is_dir():
+    raise FileNotFoundError(f'base model directory not found: {base_dir}')
+
+  out_dir = TMP_MODELS / variant_model
+  out_dir.mkdir(parents=True, exist_ok=True)
+
+  for file_name in ('model.sdf', 'model.config'):
+    source_path = base_dir / file_name
+    if not source_path.is_file():
+      raise FileNotFoundError(f'base model file not found: {source_path}')
+
+    payload = source_path.read_text(encoding='utf-8')
+    for old, new in replacements.items():
+      payload = payload.replace(old, new)
+
+    (out_dir / file_name).write_text(payload, encoding='utf-8')
+
+
+def _prepare_model_variants(drone_count: int) -> None:
+  for i in range(drone_count):
+    idx = i + 1
+    variant_iris = _variant_name('iris_with_gimbal', idx)
+    variant_gimbal = _variant_name('gimbal_small_3d', idx)
+    fdm_addr = f'127.0.0.{idx}'
+    fdm_port_in = 9002 + (10 * i)
+
+    _prepare_model_variant(
+      'gimbal_small_3d',
+      variant_gimbal,
+      {
+        '<model name="gimbal_small_3d">': f'<model name="{variant_gimbal}">',
+        '<name>gimbal_small_3d</name>': f'<name>{variant_gimbal}</name>',
+      },
+    )
+    _prepare_model_variant(
+      'iris_with_gimbal',
+      variant_iris,
+      {
+        'iris_with_gimbal': variant_iris,
+        'gimbal_small_3d': variant_gimbal,
+        '<fdm_addr>127.0.0.1</fdm_addr>': f'<fdm_addr>{fdm_addr}</fdm_addr>',
+        '<fdm_port_in>9002</fdm_port_in>': f'<fdm_port_in>{fdm_port_in}</fdm_port_in>',
+      },
+    )
+
+
 def _grid_xy(index: int, spacing: float) -> tuple[float, float]:
     cols = max(1, math.ceil(math.sqrt(index + 1)))
     row = index // cols
@@ -141,6 +197,8 @@ def main() -> int:
     drone_count = max(1, int(args.drone_count))
     pad_count = max(1, int(args.pad_count))
     spacing_m = max(1.0, float(args.spacing_m))
+
+    _prepare_model_variants(drone_count)
 
     payload = build_world(drone_count, pad_count, spacing_m, float(args.pad_offset_x_m))
     out_path = Path(args.out)
