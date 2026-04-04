@@ -80,6 +80,15 @@ cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
 python3 scripts/run_single_gazebo_multi_spawn.py --gui
 ```
 
+위 명령은 검증 성공 후 `pipeline` 알고리즘을 자동 실행합니다.
+
+검증만 수행하고 종료하려면:
+
+```bash
+cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
+python3 scripts/run_single_gazebo_multi_spawn.py --gui --no-run-algorithm
+```
+
 대규모 자동 검증/CI용(headless):
 
 ```bash

@@ -17,6 +17,53 @@ from pymavlink import mavutil
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def _run_algorithm(timeout_s: int) -> dict:
+    cmd = [
+        'python3',
+        str(ROOT / 'scripts' / 'autolanding_launcher.py'),
+        'pipeline',
+        '--workspace-root',
+        str(ROOT),
+        '--semantic-input',
+        str(ROOT / 'data' / 'samples' / 'semantic_input_example.json'),
+        '--config',
+        str(ROOT / 'ai' / 'configs' / 'policy_config.yaml'),
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=max(30, int(timeout_s)),
+            check=False,
+        )
+        output = proc.stdout or ''
+        return {
+            'ok': proc.returncode == 0,
+            'returncode': int(proc.returncode),
+            'timeout_s': max(30, int(timeout_s)),
+            'output_tail': output[-4000:],
+        }
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ''
+        return {
+            'ok': False,
+            'returncode': 124,
+            'timeout_s': max(30, int(timeout_s)),
+            'error': 'algorithm timeout',
+            'output_tail': output[-4000:],
+        }
+    except Exception as exc:
+        return {
+            'ok': False,
+            'returncode': 1,
+            'timeout_s': max(30, int(timeout_s)),
+            'error': str(exc),
+        }
+
+
 def _launch(cmd: list[str], log_path: Path) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(log_path, 'w', encoding='utf-8')
@@ -318,6 +365,8 @@ def main() -> int:
     parser.add_argument('--gui', action='store_true')
     parser.add_argument('--keep-running', action='store_true')
     parser.add_argument('--strict-heartbeat', action='store_true', help='Fail unless all MAVLink heartbeat ports are healthy')
+    parser.add_argument('--run-algorithm', action=argparse.BooleanOptionalAction, default=True, help='Run pipeline algorithm after validation succeeds (default: enabled)')
+    parser.add_argument('--algorithm-timeout-s', type=int, default=240, help='Timeout for post-validation pipeline algorithm')
     parser.add_argument('--world-out', type=str, default='/tmp/iris_runway_multi_spawn.sdf')
     args = parser.parse_args()
 
@@ -369,6 +418,16 @@ def main() -> int:
         if args.strict_heartbeat:
             report['ok'] = bool(report['ok'] and hb_check.get('ok'))
         report['strict_heartbeat'] = bool(args.strict_heartbeat)
+
+        if report['ok'] and bool(args.run_algorithm):
+            report['algorithm'] = _run_algorithm(args.algorithm_timeout_s)
+            report['ok'] = bool(report['ok'] and report['algorithm'].get('ok', False))
+        else:
+            report['algorithm'] = {
+                'ok': False,
+                'skipped': True,
+                'reason': 'validation failed or run-algorithm disabled',
+            }
 
         out = ROOT / 'data' / 'processed' / 'single_gazebo_multi_spawn_validation.json'
         out.parent.mkdir(parents=True, exist_ok=True)
