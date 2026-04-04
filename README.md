@@ -73,6 +73,15 @@ python3 scripts/autolanding_launcher.py collect_parallel --workspace-root "$PWD"
 
 메모리 사용량 최적화를 위해 기본 권장은 단일 Gazebo + 다중 드론입니다.
 
+최신 검증 기준 실행 커맨드(GUI):
+
+```bash
+cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
+python3 scripts/run_single_gazebo_multi_spawn.py --gui
+```
+
+대규모 자동 검증/CI용(headless):
+
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
 python3 scripts/run_single_gazebo_multi_spawn.py --drone-count 3 --pad-count 3 --headless
@@ -95,6 +104,13 @@ python3 scripts/run_single_gazebo_multi_spawn.py --drone-count 3 --pad-count 3 -
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
 bash scripts/run_full_pipeline.sh
+```
+
+런처를 직접 호출하려면 아래 커맨드를 사용하세요.
+
+```bash
+cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
+python3 scripts/autolanding_launcher.py full --orchestration-config ai/configs/orchestration_config.yaml
 ```
 
 이 명령은 내부적으로 다음을 수행합니다.
