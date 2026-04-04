@@ -69,6 +69,25 @@ python3 scripts/autolanding_launcher.py sim --workspace-root "$PWD" --gui
 python3 scripts/autolanding_launcher.py collect_parallel --workspace-root "$PWD" --workers 3 --scenarios-per-worker 2
 ```
 
+### 2.3 단일 Gazebo 다중 드론/패드 스폰 (메모리 최적화)
+
+메모리 사용량 최적화를 위해 기본 권장은 단일 Gazebo + 다중 드론입니다.
+
+```bash
+cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
+python3 scripts/run_single_gazebo_multi_spawn.py --drone-count 3 --pad-count 3 --headless
+```
+
+검증 내용:
+- Gazebo 상태 토픽: `/world/iris_runway/model/iris_with_gimbal_w*/joint_state`
+- MAVLink heartbeat: `tcp:127.0.0.1:5760,5770,5780 ...` (옵션, `--strict-heartbeat` 사용 시 필수)
+
+검증 리포트:
+- `data/processed/single_gazebo_multi_spawn_validation.json`
+
+설정 파일:
+- `ai/configs/multi_spawn_config.yaml`
+
 ### 2.0 하나만 실행해서 전체 파이프라인 돌리기
 
 아래 명령 1개로 전체 파이프라인(full 모드)을 실행합니다.
@@ -80,6 +99,8 @@ bash scripts/run_full_pipeline.sh
 
 이 명령은 내부적으로 다음을 수행합니다.
 - Gazebo/SITL/RViz 런처 실행
+- 자동 비행 데모 명령 전송(GUIDED -> ARM -> TAKEOFF)
+- 이륙 후 armed/mode/고도 상태 변화 수신 확인
 - 파이프라인 실행
 - 검증 JSON 생성
 - 논문용 플롯 생성
@@ -88,6 +109,17 @@ bash scripts/run_full_pipeline.sh
 - ai/configs/orchestration_config.yaml
 
 파일에 주석으로 각 파라미터 의미를 설명해두었습니다.
+
+드론이 움직이지 않으면 아래 값을 확인하세요.
+- auto_flight_demo: true
+- demo_takeoff_alt_m: 3.0 이상
+- demo_master_port: 5760/5770/5780 중 실제 수신되는 포트
+
+연구용 기본값은 다음을 기준으로 잡았습니다.
+- GUI 모드 기본
+- full 모드에서 자동 이륙 및 상태 검증
+- 3 드론, 2 시나리오의 데이터 수집 기본값
+- verbose 출력 최소화로 논문 실험 로그 정리
 
 ### 2.1 빠른 실행 순서 (권장)
 

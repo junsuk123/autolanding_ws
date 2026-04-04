@@ -55,7 +55,8 @@ def start_instance(instance_id, ardupilot_dir, speedup, log_dir):
     cleanup_instance(instance_id)
 
     bin_path = get_sitl_binary(ardupilot_dir)
-    sim_addr = "127.0.0.1"
+    # Use per-instance loopback address to avoid JSON endpoint collisions.
+    sim_addr = f"127.0.0.{instance_id + 1}"
     log_file = log_dir / f"arducopter_I{instance_id}.log"
 
     # FDM ports: 9002+10*i for input, 9003+10*i for output

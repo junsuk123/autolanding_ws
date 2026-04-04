@@ -16,15 +16,29 @@ world: /tmp/iris_runway_aruco_landing.sdf
 
 # 시뮬레이션 표시 옵션
 # gui=true 면 GUI 모드, headless=true 면 서버 모드
-# 둘 다 true로 두지 마세요. headless=true가 우선됩니다.
+# 논문 재현성과 로그 안정성을 위해 기본은 GUI 모드로 두되,
+# headless로 바꾸면 배치 실험에 더 적합합니다.
 gui: true
 headless: false
 
 # 로그/산출물 옵션
-verbose: true
+# verbose=false로 두면 터미널 출력이 짧아지고 CI 실행이 깔끔해집니다.
+verbose: false
 no_plots: false
 
+# 비행 데모 옵션
+# full/sim/mission 모드에서 자동으로 GUIDED/ARM/TAKEOFF 명령을 보내고,
+# 이후 고도/armed/state 변화가 실제로 수신되는지 확인합니다.
+auto_flight_demo: true
+# 이륙 목표 고도(미터)
+demo_takeoff_alt_m: 3.0
+# 제어 포트 (권장: 5760 = I0, 5770 = I1, 5780 = I2)
+# 포트를 고정하면 재현성이 높아지고, 0이면 자동 재시도합니다.
+demo_master_port: 5760
+
 # 수집/멀티드론 관련 파라미터
+# 연구 기본값은 3개 드론/2개 시나리오로 되어 있으며,
+# 데이터 수집/논문 그림 생성 전에 구조를 확인하기에 충분한 규모입니다.
 workers: 3
 scenarios_per_worker: 2
 duration: 120
