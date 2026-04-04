@@ -405,6 +405,7 @@ end
 repo_root = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(mfilename('fullpath')))))));
 iicc26_setup = fullfile(fileparts(repo_root), 'IICC26_ws', 'install', 'setup.bash');
 source_overlay = sprintf('[ -f "%s" ] && source "%s" >/dev/null 2>&1; ', iicc26_setup, iicc26_setup);
+source_overlay = [source_overlay 'export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; '];
 
 check_cmd = ['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' source_overlay 'set -u; ros2 pkg list 2>/dev/null | grep -q "^mavros$"'''];
 [check_rc, ~] = system(check_cmd);

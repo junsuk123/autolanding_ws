@@ -111,6 +111,7 @@ def main():
         description="Launch multi-drone ArduPilot SITL instances"
     )
     parser.add_argument("--count", type=int, default=3, help="Number of instances (default: 3)")
+    parser.add_argument("--start-index", type=int, default=0, help="Starting instance index (default: 0)")
     parser.add_argument("--speedup", type=float, default=1.0, help="Simulation speedup (default: 1.0)")
     parser.add_argument(
         "--ardupilot-dir",
@@ -123,6 +124,9 @@ def main():
 
     if args.count < 1 or args.count > 10:
         print("[ERROR] count must be 1-10")
+        sys.exit(1)
+    if args.start_index < 0 or args.start_index > 99:
+        print("[ERROR] start-index must be 0-99")
         sys.exit(1)
 
     if args.ardupilot_dir:
@@ -139,7 +143,8 @@ def main():
         pids = []
 
         for i in range(args.count):
-            pid = start_instance(i, ardupilot_dir, args.speedup, log_dir)
+            instance_id = args.start_index + i
+            pid = start_instance(instance_id, ardupilot_dir, args.speedup, log_dir)
             pids.append(pid)
             time.sleep(1.0)  # Stagger startup
 

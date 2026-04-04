@@ -4,10 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-if command -v matlab >/dev/null 2>&1; then
-  matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
-else
-  echo "[error] matlab command not found."
-  echo "Run inside MATLAB: run('matlab/scripts/run_autolanding_pipeline.m')"
-  exit 1
-fi
+python3 "$ROOT_DIR/scripts/autolanding_launcher.py" pipeline \
+  --workspace-root "$ROOT_DIR" \
+  --semantic-input "$ROOT_DIR/data/samples/semantic_input_example.json" \
+  --config "$ROOT_DIR/ai/configs/policy_config.yaml"

@@ -108,3 +108,10 @@ ROS2 demo run in MATLAB:
 ```matlab
 run('matlab/scripts/run_autolanding_ros_demo.m')
 ```
+
+## Current Runtime Behavior
+
+- `AutoLandingMainFull()` is now the single automatic entrypoint; it reads `AUTOLANDING_GAZEBO_MODE` only when you want to override GUI versus headless execution.
+- `run_autolanding_pipeline()` simply forwards into `AutoLandingMainFull()`.
+- If multi-drone JSON readiness is not fully ready, the pipeline aborts rather than masking startup faults with a fallback collection path.
+- The collection workflow expects normal control and state readiness so it can validate the real drone behavior without simulated fallback motion.

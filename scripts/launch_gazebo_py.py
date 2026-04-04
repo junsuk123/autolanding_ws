@@ -22,22 +22,26 @@ def get_gazebo_env():
 
     # **CRITICAL**: Remove MATLAB-polluted LD_LIBRARY_PATH to avoid Qt conflicts
     # MATLAB injects its own Qt libraries which conflict with system Gazebo Qt
-    env.pop("LD_LIBRARY_PATH", None)
+    # Instead of removing LD_LIBRARY_PATH completely, ensure system paths are available
+    # Shell launchers use: export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
+    current_ld_path = env.get("LD_LIBRARY_PATH", "")
+    system_lib_path = "/usr/lib/x86_64-linux-gnu"
+    if system_lib_path not in current_ld_path:
+        env["LD_LIBRARY_PATH"] = f"{system_lib_path}:{current_ld_path}".rstrip(":")
+    else:
+        env["LD_LIBRARY_PATH"] = current_ld_path
     
     # Clean up other MATLAB-injected variables that interfere with rendering
-    # OSG_LD_LIBRARY_PATH: MATLAB's OpenSceneGraph libs conflict with Gazebo rendering
-    # QT_*: MATLAB's Qt variables conflict with system Gazebo Qt
     for var in ["OSG_LD_LIBRARY_PATH", "QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "QT_QPA_PLATFORMTHEME"]:
         env.pop(var, None)
 
-    # Keep Gazebo GUI rendering on the same stable path as the working shell launchers.
+    # Match shell launcher settings exactly (launch_gazebo_gui_robust.sh)
     env["QT_QPA_PLATFORM"] = "xcb"
     env["QT_QPA_PLATFORM_PLUGIN_PATH"] = "/usr/lib/x86_64-linux-gnu/qt5/plugins"
-    env["QT_XCB_GL_INTEGRATION"] = "none"
-    env["QT_OPENGL"] = "software"
-    env["LIBGL_ALWAYS_SOFTWARE"] = "1"
-    env["MESA_LOADER_DRIVER_OVERRIDE"] = "llvmpipe"
     env["LIBGL_ALWAYS_INDIRECT"] = "0"
+    env["NVIDIA_DRIVER_CAPABILITIES"] = "graphics,compute"
+    env["WAYLAND_DISPLAY"] = ""  # Force X11, disable Wayland
+    env["NV_GPU_THREAD_SAFETY"] = "1"  # GPU thread safety for rendering
 
     # Ensure /tmp is in model search path so dynamically generated iris_with_gimbal_w* variants are found
     existing_path = env.get("GZ_SIM_RESOURCE_PATH", "")
@@ -96,9 +100,7 @@ def launch_gazebo(world_file, gui=True, verbose=False):
     else:
         cmd.append("-v1")
 
-    if gui:
-        cmd.append("-g")  # GUI mode
-    else:
+    if not gui:
         cmd.append("-s")  # Server (headless) mode
 
     cmd.append("-r")  # Use physics server
@@ -135,6 +137,7 @@ def launch_gazebo(world_file, gui=True, verbose=False):
                 stdout=log_f,
                 stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
+                preexec_fn=os.setsid,  # Create new session like shell's setsid
             )
             print(f"[INFO] Gazebo started (PID={proc.pid}, log=/tmp/gz_sim.log)")
             return proc
@@ -152,13 +155,14 @@ def main():
         default="/tmp/iris_runway_aruco_landing.sdf",
         help="Path to world SDF file",
     )
-    parser.add_argument("--gui", action="store_true", default=True, help="Enable GUI (default)")
-    parser.add_argument("--headless", action="store_true", help="Run in headless mode (server only)")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode (server only, default if no --gui)")
+    parser.add_argument("--gui", action="store_true", help="Enable GUI (requires OpenGL context)")
     parser.add_argument("--verbose", action="store_true", help="Verbose Gazebo logging")
 
     args = parser.parse_args()
 
-    gui = not args.headless
+    # Default to headless unless --gui is explicitly requested
+    gui = args.gui and not args.headless
 
     proc = launch_gazebo(args.world, gui=gui, verbose=args.verbose)
     if not proc:

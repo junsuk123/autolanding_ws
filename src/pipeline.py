@@ -6,8 +6,12 @@ from typing import Any, Dict
 
 import yaml
 
-from semantic_feature_extractor import extract_semantic_features
-from trajectory_policy import generate_trajectory
+try:
+    from .semantic_feature_extractor import extract_semantic_features
+    from .trajectory_policy import generate_trajectory
+except ImportError:
+    from semantic_feature_extractor import extract_semantic_features
+    from trajectory_policy import generate_trajectory
 
 
 def _load_json(path: str) -> Dict[str, Any]:

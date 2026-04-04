@@ -351,6 +351,7 @@ end
 % Cleanup handler for graceful interrupt (Ctrl+C)
 collection_state = struct('session_dir', sessionDir, 'interrupted', false, 'last_saved_idx', 0, 'raw_data', raw_data);
 cleanup_obj = onCleanup(@() autlDataCollectionCleanup(collection_state));
+sample_idx = 0;
 
 try
     % Connect to MAVProxy for telemetry
@@ -361,7 +362,7 @@ try
         'allow_stale_cache_on_timeout', logical(mission_config.telemetry_allow_stale_cache_on_timeout), ...
         'cache_key', mission_config.session_id);
     control_cfg = struct('mav', struct('master_connection', mission_config.mavlink_master, ...
-        'allow_port_fallback', true, 'timeout_s', mission_config.mavlink_control_timeout_s));
+        'allow_port_fallback', false, 'timeout_s', mission_config.mavlink_control_timeout_s));
     control_cfg.control = struct('backend', mission_config.control_backend, ...
         'allow_backend_fallback', logical(mission_config.control_backend_fallback), ...
         'mavros_namespace', mission_config.mavros_namespace);
@@ -371,7 +372,7 @@ try
     fprintf('%s[AutoLandingDataCollection] Connecting to vehicle via %s (namespace=%s)...\n', ...
         log_prefix, upper(char(string(mission_config.control_backend))), char(string(mission_config.mavros_namespace)));
 
-    if mission_config.require_state_topic_before_start && strcmpi(char(string(mission_config.control_backend)), 'mavros')
+    if mission_config.require_state_topic_before_start && strcmpi(char(string(mission_config.control_backend)), 'mavros') && mission_config.enable_auto_motion
         [state_ok, state_msg] = autlWaitForStateTopicGate(mission_config, control_cfg);
         if ~state_ok
             error('AutoLanding:StateTopicUnavailable', ...
@@ -402,21 +403,15 @@ try
             if ~precheck_res.is_success
                 control_state.precheck_failed = true;
                 precheck_msg = autlCompactMavErrorTop(precheck_res.error_message);
-                fprintf('%s[AutoLandingDataCollection] Warning: MAVLink precheck failed: %s\n', ...
-                    log_prefix, precheck_msg);
-                fprintf('%s[AutoLandingDataCollection] Info: continuing with a best-effort arm/takeoff attempt, then set_pose fallback if needed.\n', ...
-                    log_prefix);
                 autlFlowLog(flow_log_file, 'autlRunDataCollection', 'mavlink_precheck_failed', autlFlowMerge(flow_ctx, struct( ...
                     'message', precheck_msg, 'fallback_bootstrap', char(string(boot_msg)))));
-                if exist('boot_msg', 'var') && strlength(string(boot_msg)) > 0 && ~strcmp(string(boot_msg), "not_used")
-                    fprintf('%s[AutoLandingDataCollection] Info: fallback bootstrap result: %s\n', log_prefix, char(string(boot_msg)));
-                end
+                error('AutoLanding:MavlinkPrecheckFailed', ...
+                    '%s[AutoLandingDataCollection] MAVLink precheck failed: %s', log_prefix, precheck_msg);
             end
         end
     end
 
     if mission_config.enable_auto_motion
-        fprintf('%s[AutoLandingDataCollection] Auto motion control: ENABLED\n', log_prefix);
         fprintf('%s[AutoLandingDataCollection] Auto motion: setting GUIDED mode...\n', log_prefix);
         mode_res = autlMavproxyControl('set_mode', struct('mode', 'GUIDED'), control_cfg);
         if ~mode_res.is_success
@@ -430,8 +425,8 @@ try
         arm_res = autlMavproxyControl('arm', struct(), control_cfg);
         control_state.arm_sent = arm_res.is_success;
         if ~arm_res.is_success
-            fprintf('%s[AutoLandingDataCollection] Warning: arm failed: %s\n', log_prefix, ...
-                autlCompactMavErrorTop(arm_res.error_message));
+            error('AutoLanding:ArmFailed', '%s[AutoLandingDataCollection] Arm failed: %s', ...
+                log_prefix, autlCompactMavErrorTop(arm_res.error_message));
         else
             fprintf('%s[AutoLandingDataCollection] Auto motion: armed\n', log_prefix);
         end
@@ -441,8 +436,8 @@ try
             takeoff_res = autlMavproxyControl('takeoff', struct('height', mission_config.takeoff_height_m), control_cfg);
             control_state.takeoff_sent = takeoff_res.is_success;
             if ~takeoff_res.is_success
-                fprintf('%s[AutoLandingDataCollection] Warning: takeoff failed: %s\n', log_prefix, ...
-                    autlCompactMavErrorTop(takeoff_res.error_message));
+                error('AutoLanding:TakeoffFailed', '%s[AutoLandingDataCollection] Takeoff failed: %s', ...
+                    log_prefix, autlCompactMavErrorTop(takeoff_res.error_message));
             else
                 fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted\n', log_prefix);
                 if mission_config.require_takeoff_confirmation_before_collection
@@ -502,13 +497,6 @@ try
     effective_telemetry_interval = max(mission_config.telemetry_query_interval_s, 1.0);
     effective_control_interval = max(mission_config.control_interval_s, 2.0);
     flow_flags = struct('no_link_logged', false);
-    try
-        drone_fallback_runtime = autlInitDroneFallbackRuntime(mission_config, log_prefix);
-    catch ME_fallback_init
-        drone_fallback_runtime = struct('enabled', false);
-        fprintf('%s[AutoLandingDataCollection] Warning: drone fallback init unavailable, disabled this scenario: %s\n', ...
-            log_prefix, ME_fallback_init.message);
-    end
 
     % Start collection timing after control/bootstrap phase so long MAVLink timeouts
     % do not consume the sampling window and force zero-sample scenarios.
@@ -564,25 +552,8 @@ try
                 mission_config, landing_pad_runtime, elapsed_s, log_prefix);
 
             if (~mission_config.enable_auto_motion || ~control_state.takeoff_sent)
-                [mission_config, drone_fallback_runtime] = autlApplyDroneFallbackMotion( ...
-                    mission_config, drone_fallback_runtime, elapsed_s, log_prefix);
-
-                if isfield(vehicle_state, 'mode') && strcmpi(char(string(vehicle_state.mode)), 'NO_LINK') && ...
-                        isfield(drone_fallback_runtime, 'enabled') && drone_fallback_runtime.enabled
-                    fallback_pos = [mission_config.reset_spawn_xy(1), mission_config.reset_spawn_xy(2), mission_config.reset_spawn_z_m];
-                    if sample_idx > 1
-                        prev_pos = raw_data.position_xyz(sample_idx - 1, :);
-                    else
-                        prev_pos = fallback_pos;
-                    end
-                    dt_fallback = max(sample_interval, 0.05);
-                    vehicle_state.position = fallback_pos;
-                    vehicle_state.velocity = (fallback_pos - prev_pos) / dt_fallback;
-                    vehicle_state.barometer_alt = fallback_pos(3);
-                    vehicle_state.rangefinder_dist = max(0.0, fallback_pos(3));
-                    vehicle_state.has_local_position = 1;
-                    vehicle_state.mode = 'SIM_FALLBACK';
-                end
+                error('AutoLanding:ControlUnavailable', ...
+                    '%s[AutoLandingDataCollection] Auto motion is not available; refusing fallback collection.', log_prefix);
             end
             
             % Store raw data (no processing, no ontology)
@@ -785,7 +756,6 @@ try
     end
 
     autlReleaseLandingPadRuntime(landing_pad_runtime);
-    autlReleaseDroneFallbackRuntime(drone_fallback_runtime);
     autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_completed', autlFlowMerge(flow_ctx, struct( ...
         'sample_count', sample_idx, 'duration_s', collection_elapsed_s, 'session_dir', sessionDir)));
 
@@ -858,18 +828,12 @@ catch ME
         fprintf('%s[AutoLandingDataCollection] ERROR: %s\n', log_prefix, ME.message);
         autlFlowLog(flow_log_file, 'autlRunDataCollection', 'collection_error', autlFlowMerge(flow_ctx, struct( ...
             'error', ME.message, 'sample_count', sample_idx)));
+    end
 end
 
 try
     if exist('landing_pad_runtime', 'var')
         autlReleaseLandingPadRuntime(landing_pad_runtime);
-    end
-catch
-end
-
-try
-    if exist('drone_fallback_runtime', 'var')
-        autlReleaseDroneFallbackRuntime(drone_fallback_runtime);
     end
 catch
 end
@@ -1046,12 +1010,10 @@ try
         end
     end
     
-    % If timeout or error, optionally use simulated data
+    % If timeout or error, return a no-link state instead of fabricating motion.
     if status ~= 0
         if logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
             vehicle_state = cached_state;
-        elseif mav_config.allow_simulated_fallback
-            vehicle_state = autlGenerateSimulatedVehicleState();
         else
             vehicle_state = autlGenerateNoLinkState();
         end
@@ -1062,8 +1024,6 @@ try
 catch
     if logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
         vehicle_state = cached_state;
-    elseif mav_config.allow_simulated_fallback
-        vehicle_state = autlGenerateSimulatedVehicleState();
     else
         vehicle_state = autlGenerateNoLinkState();
     end
@@ -2187,5 +2147,3 @@ if nargin >= 2 && isstruct(extra_payload)
 end
 end
 
-% End of main autlRunDataCollection function
-end

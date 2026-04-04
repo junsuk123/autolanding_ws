@@ -1,0 +1,30 @@
+# AutoLanding Python 오케스트레이션 설정 파일
+# 이 파일만 수정하면 전체 실행 파라미터를 바꿀 수 있습니다.
+
+# 실행 모드
+# - full: Gazebo + SITL + RViz 런처 실행 후 파이프라인/검증/플롯까지 수행
+# - pipeline: 파이프라인/검증/플롯만 수행
+# - collect_parallel: 수집 오케스트레이션 모드
+mode: full
+
+# 기본 경로들
+workspace_root: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
+semantic_input: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/samples/semantic_input_example.json
+config: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/ai/configs/policy_config.yaml
+plots_dir: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/plots/paper
+world: /tmp/iris_runway_aruco_landing.sdf
+
+# 시뮬레이션 표시 옵션
+# gui=true 면 GUI 모드, headless=true 면 서버 모드
+# 둘 다 true로 두지 마세요. headless=true가 우선됩니다.
+gui: true
+headless: false
+
+# 로그/산출물 옵션
+verbose: true
+no_plots: false
+
+# 수집/멀티드론 관련 파라미터
+workers: 3
+scenarios_per_worker: 2
+duration: 120

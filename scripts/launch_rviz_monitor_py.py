@@ -87,7 +87,7 @@ def launch_rviz():
     return cmd.strip()
 
 
-def launch_publish_multi_drone_odom():
+def launch_publish_multi_drone_odom(workers=1):
     """Launch multi-drone odometry publisher."""
     script = os.path.expanduser("~/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/scripts/publish_multi_drone_odom.py")
     
@@ -100,7 +100,7 @@ def launch_publish_multi_drone_odom():
     bash -lc '
     {env_clean}{source_ros_setup()}
     export ROS_DOMAIN_ID=${{ROS_DOMAIN_ID:-0}}
-    python3 "{script}" 2>&1
+    python3 "{script}" --workers {workers} 2>&1
     '
     """
     return cmd.strip()
@@ -136,11 +136,16 @@ class RvizMonitor:
     def start_all(self):
         """Start all monitoring components."""
         print("[INFO] Starting RViz monitoring stack...")
+        workers_env = os.environ.get("AUTOLANDING_NUM_WORKERS", "1")
+        try:
+            workers = max(1, int(workers_env))
+        except Exception:
+            workers = 1
         
         components = [
             ("ros_gz_bridge", launch_ros_gz_bridge(), self.log_dir / "autolanding_ros_gz_bridge.log"),
             ("ros2_aruco", launch_ros2_aruco(), self.log_dir / "autolanding_ros2_aruco.log"),
-            ("multi_drone_odom", launch_publish_multi_drone_odom(), self.log_dir / "autolanding_multi_drone_odom.log"),
+            ("multi_drone_odom", launch_publish_multi_drone_odom(workers), self.log_dir / "autolanding_multi_drone_odom.log"),
             ("rviz2", launch_rviz(), self.log_dir / "autolanding_rviz.log"),
         ]
 

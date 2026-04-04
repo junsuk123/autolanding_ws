@@ -5,11 +5,12 @@ Multi-drone MAVROS launcher (Python-based, replaces launch_multi_mavros.sh)
 Launches independent MAVROS nodes for each drone with proper namespacing and FCU endpoint configuration.
 
 Usage:
-  python3 launch_multi_mavros_py.py [--count 3] [--ns-prefix /mavros_w] [--verbose]
+    python3 launch_multi_mavros_py.py [--count 3] [--start-index 1] [--ns-prefix /mavros_w] [--verbose]
 """
 
 import argparse
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -35,9 +36,25 @@ def source_ros_setup():
     return source_cmd
 
 
+def wait_for_tcp_listener(host, port, timeout_s=30.0, poll_s=0.5):
+    """Wait until host:port accepts a TCP connection."""
+    deadline = time.time() + max(0.0, timeout_s)
+    while time.time() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.6)
+        try:
+            sock.connect((host, int(port)))
+            sock.close()
+            return True
+        except Exception:
+            sock.close()
+            time.sleep(max(0.1, poll_s))
+    return False
+
+
 def launch_mavros_instance(instance_id, ns_prefix, verbose=False):
     """Launch a single MAVROS instance."""
-    namespace = f"{ns_prefix}{instance_id}"
+    namespace = f"{ns_prefix}{instance_id}".lstrip("/")
     serial0_port = 5760 + 10 * (instance_id - 1)
     serial1_port = 5762 + 10 * (instance_id - 1)
 
@@ -46,22 +63,33 @@ def launch_mavros_instance(instance_id, ns_prefix, verbose=False):
         "ros2",
         "launch",
         "mavros",
-        "apm.launch.py",
-        f"fcu_url:=tcp:127.0.0.1:{serial0_port}",
+        "apm.launch",
+        f"namespace:={namespace}",
+        f"fcu_url:=tcp://127.0.0.1:{serial0_port}",
         f"tgt_system:=1",
         f"tgt_component:=1",
+        f"fcu_protocol:=v2.0",
+        f"respawn_mavros:=false",
         f"log_level:={'DEBUG' if verbose else 'INFO'}",
     ]
 
     # Wrap with namespace and ROS sourcing, with cleaned environment
     # Remove MATLAB-polluted variables before sourcing ROS2
     env_clean_cmd = "unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; "
-    full_cmd = f"bash -lc '{env_clean_cmd}{source_ros_setup()} export ROS_DOMAIN_ID=${{ROS_DOMAIN_ID:-0}}; export ROS_NAMESPACE={namespace}; {' '.join(cmd_list)}'"
+    full_cmd = f"bash -lc '{env_clean_cmd}{source_ros_setup()} export ROS_DOMAIN_ID=${{ROS_DOMAIN_ID:-0}}; {' '.join(cmd_list)}'"
 
     print(f"[INFO] MAVROS W{instance_id} launcher command:")
     print(f"        namespace={namespace}")
     print(f"        FCU endpoint=tcp:127.0.0.1:{serial0_port}")
     print(f"        fallback=tcp:127.0.0.1:{serial1_port}")
+
+    if not wait_for_tcp_listener("127.0.0.1", serial0_port, timeout_s=35.0, poll_s=0.5):
+        print(
+            f"[WARNING] W{instance_id} FCU endpoint tcp:127.0.0.1:{serial0_port} did not open within timeout; launching MAVROS anyway",
+            file=sys.stderr,
+        )
+    else:
+        print(f"[INFO] W{instance_id} FCU endpoint is reachable, launching MAVROS")
 
     try:
         log_file = f"/tmp/autolanding_mavros_w{instance_id}.log"
@@ -105,10 +133,11 @@ def verify_mavros_packages():
 class MavrosLauncher:
     """Manager for multi-MAVROS processes."""
 
-    def __init__(self, count=3, ns_prefix="/mavros_w", verbose=False):
+    def __init__(self, count=3, ns_prefix="/mavros_w", verbose=False, start_index=1):
         self.count = count
         self.ns_prefix = ns_prefix
         self.verbose = verbose
+        self.start_index = start_index
         self.processes = {}
 
     def start_all(self):
@@ -117,7 +146,8 @@ class MavrosLauncher:
         print(f"[INFO] Namespace prefix: {self.ns_prefix}")
 
         for i in range(1, self.count + 1):
-            proc = launch_mavros_instance(i, self.ns_prefix, self.verbose)
+            instance_id = self.start_index + (i - 1)
+            proc = launch_mavros_instance(instance_id, self.ns_prefix, self.verbose)
             if proc:
                 self.processes[i] = proc
                 time.sleep(0.5)
@@ -158,6 +188,12 @@ def main():
         help="Number of MAVROS instances (default: 3)",
     )
     parser.add_argument(
+        "--start-index",
+        type=int,
+        default=1,
+        help="Starting instance index (default: 1)",
+    )
+    parser.add_argument(
         "--ns-prefix",
         type=str,
         default="/mavros_w",
@@ -170,13 +206,16 @@ def main():
     if args.count < 1 or args.count > 10:
         print("[ERROR] count must be 1-10", file=sys.stderr)
         return 1
+    if args.start_index < 1 or args.start_index > 99:
+        print("[ERROR] start-index must be 1-99", file=sys.stderr)
+        return 1
 
     # Verify packages
     if not verify_mavros_packages():
         print("[ERROR] MAVROS packages not found. Check ROS2 installation.", file=sys.stderr)
         return 1
 
-    launcher = MavrosLauncher(count=args.count, ns_prefix=args.ns_prefix, verbose=args.verbose)
+    launcher = MavrosLauncher(count=args.count, ns_prefix=args.ns_prefix, verbose=args.verbose, start_index=args.start_index)
     started = launcher.start_all()
 
     if started == 0:

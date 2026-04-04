@@ -11,8 +11,21 @@ function [X_train, y_train, X_val, y_val, data_summary] = autlLoadAndPrepareTrai
 
 fprintf('[DataLoader] Searching for collected scenarios...\n');
 
-% Find all raw_data.mat files from parallel collection
-scenario_files = dir(fullfile(collection_dir, 'worker_*', 'scenario_*', 'raw_data.mat'));
+% Find all raw_data.mat files from parallel or merged collection trees.
+manifest_path = autlFindUnifiedManifestPath(collection_dir);
+if strlength(string(manifest_path)) > 0
+    fprintf('[DataLoader] Using unified manifest: %s\n', manifest_path);
+    scenario_files = autlScenarioFilesFromManifest(manifest_path);
+    if isempty(scenario_files)
+        fprintf('[DataLoader] Warning: unified manifest had no usable scenarios. Falling back to directory scan.\n');
+        scenario_files = dir(fullfile(collection_dir, '**', 'raw_data.mat'));
+    end
+else
+    scenario_files = dir(fullfile(collection_dir, '**', 'raw_data.mat'));
+    if isempty(scenario_files)
+        scenario_files = dir(fullfile(collection_dir, 'worker_*', 'scenario_*', 'raw_data.mat'));
+    end
+end
 num_scenarios = numel(scenario_files);
 
 if num_scenarios == 0
@@ -83,14 +96,32 @@ end
 num_loaded = size(all_X, 1);
 fprintf('[DataLoader] Successfully loaded %d scenarios\n', num_loaded);
 
-if num_loaded < (num_train + num_val)
-    fprintf('[DataLoader] Warning: Fewer scenarios than requested. Adjusting sizes.\n');
-    if num_loaded >= 2
-        num_val = max(1, floor(num_loaded * 0.25));
-        num_train = num_loaded - num_val;
+target_total = num_train + num_val;
+allow_copy_env = lower(strtrim(getenv('AUTOLANDING_COPY_INSUFFICIENT_SCENARIOS')));
+allow_copy_when_insufficient = true;
+if strcmp(allow_copy_env, '0') || strcmp(allow_copy_env, 'false')
+    allow_copy_when_insufficient = false;
+end
+
+if num_loaded < target_total
+    fprintf('[DataLoader] Warning: Fewer scenarios than requested (%d < %d).\n', num_loaded, target_total);
+
+    if allow_copy_when_insufficient && num_loaded >= 1
+        copy_needed = target_total - num_loaded;
+        copy_idx = mod(0:copy_needed-1, num_loaded) + 1;
+        all_X = [all_X; all_X(copy_idx, :)];
+        all_y = [all_y; all_y(copy_idx, :)];
+        num_loaded = size(all_X, 1);
+        fprintf('[DataLoader] Copied %d scenario samples to fill target split size (%d).\n', copy_needed, num_loaded);
     else
-        num_train = num_loaded;
-        num_val = 0;
+        fprintf('[DataLoader] Adjusting train/val sizes to available samples.\n');
+        if num_loaded >= 2
+            num_val = max(1, floor(num_loaded * 0.25));
+            num_train = num_loaded - num_val;
+        else
+            num_train = num_loaded;
+            num_val = 0;
+        end
     end
 end
 
@@ -151,6 +182,57 @@ elseif isfield(data, 'raw_data')
     raw_data = data.raw_data;
 else
     error('Variable ''raw_data'' or ''raw_data_trimmed'' not found in %s', raw_file);
+end
+end
+
+function manifest_path = autlFindUnifiedManifestPath(collection_dir)
+% Prefer a merged manifest when the collection root is an isolated swarm output.
+
+manifest_path = '';
+if nargin < 1 || strlength(string(collection_dir)) == 0
+    return;
+end
+
+candidate_paths = {
+    fullfile(collection_dir, 'unified_manifest.json'), ...
+    fullfile(collection_dir, 'merged', 'unified_manifest.json')
+};
+
+for i = 1:numel(candidate_paths)
+    if isfile(candidate_paths{i})
+        manifest_path = candidate_paths{i};
+        return;
+    end
+end
+end
+
+function scenario_files = autlScenarioFilesFromManifest(manifest_path)
+% Build dir()-compatible entries from a unified manifest.
+
+scenario_files = struct('folder', {}, 'name', {});
+if nargin < 1 || ~isfile(manifest_path)
+    return;
+end
+
+manifest = jsondecode(fileread(manifest_path));
+if ~isfield(manifest, 'scenarios') || isempty(manifest.scenarios)
+    return;
+end
+
+scenarios = manifest.scenarios;
+if ~isstruct(scenarios)
+    return;
+end
+
+for i = 1:numel(scenarios)
+    if ~isfield(scenarios(i), 'destination')
+        continue;
+    end
+    scenario_dir = char(string(scenarios(i).destination));
+    raw_file = fullfile(scenario_dir, 'raw_data.mat');
+    if isfile(raw_file)
+        scenario_files(end+1, 1) = struct('folder', scenario_dir, 'name', 'raw_data.mat'); %#ok<AGROW>
+    end
 end
 end
 

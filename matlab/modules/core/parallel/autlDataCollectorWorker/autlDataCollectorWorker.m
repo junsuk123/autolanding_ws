@@ -63,10 +63,6 @@ end
 if ~isfield(config, 'progress_queue')
     config.progress_queue = [];
 end
-if ~isfield(config, 'reject_fallback_only_mode')
-    config.reject_fallback_only_mode = true;
-end
-
 % Create worker output directory
 if ~exist(config.worker_log_dir, 'dir')
     try
@@ -159,7 +155,7 @@ try
         if ~isfield(mission_cfg, 'mavlink_precheck_timeout_s') || ~isfinite(mission_cfg.mavlink_precheck_timeout_s)
             mission_cfg.mavlink_precheck_timeout_s = mission_cfg.mavlink_control_timeout_s;
         end
-        % Keep probes bounded, but avoid too-short timeouts that force false fallback-only mode.
+        % Keep probes bounded, but avoid too-short timeouts that cause false readiness failures.
         mission_cfg.mavlink_precheck_timeout_s = min(30.0, max(6.0, double(mission_cfg.mavlink_precheck_timeout_s)));
         mission_cfg.mavlink_control_timeout_s = min(30.0, max(6.0, double(mission_cfg.mavlink_control_timeout_s)));
         if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1
@@ -215,15 +211,8 @@ try
                 fprintf(log_fid, '[Worker %d] Scenario %d ArduPilot reset warning: %s\n', worker_id, scenario_num, ap_msg);
                 ap_msg_l = lower(char(string(ap_msg)));
                 if contains(ap_msg_l, 'mavlink_unreachable') || contains(ap_msg_l, 'fcu not connected') || contains(ap_msg_l, 'state echo timeout')
-                    if config.reject_fallback_only_mode
-                        error('AutoLanding:FallbackOnlyRejected', ...
-                            'Scenario %d rejected: MAVROS state/topic unreachable (%s)', scenario_num, ap_msg);
-                    else
-                        mission_cfg.enable_auto_motion = false;
-                        mission_cfg.require_mavlink_for_auto_motion = false;
-                        fprintf('[Worker %d] Scenario %d fallback-only mode forced (MAVLink unreachable).\n', worker_id, scenario_num);
-                        fprintf(log_fid, '[Worker %d] Scenario %d fallback-only mode forced (MAVLink unreachable).\n', worker_id, scenario_num);
-                    end
+                    error('AutoLanding:MavlinkUnavailable', ...
+                        '[Worker %d] Scenario %d aborted: MAVLink unreachable (%s).', worker_id, scenario_num, ap_msg);
                 end
             end
             autlFlowLog(worker_flow_log, 'autlDataCollectorWorker', 'ardupilot_reset', struct( ...
