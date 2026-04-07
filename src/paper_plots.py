@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import math
 import csv
+import warnings
 from pathlib import Path
 from typing import Any
 
 import matplotlib
 
 matplotlib.use('Agg')
+# Some Linux environments mix system/pip matplotlib installs and emit a
+# non-fatal Axes3D warning; suppress it to keep launcher output clean.
+warnings.filterwarnings(
+    'ignore',
+    message='Unable to import Axes3D.*',
+    category=UserWarning,
+)
 import matplotlib.pyplot as plt
 
 

@@ -1,0 +1,21 @@
+# 단일 Gazebo 다중 스폰 설정 (메모리 최적화 목적)
+# 하나의 Gazebo 인스턴스에서 여러 드론/착륙패드를 간격 기반으로 자동 스폰합니다.
+
+# 스폰 개수
+# - drone_count: 동시에 띄울 드론 수
+# - pad_count: 동시에 띄울 착륙패드 수
+drone_count: 3
+pad_count: 3
+
+# 배치 간격(미터)
+# 드론/패드를 격자(grid) 형태로 배치할 때 중심 간격입니다.
+spacing_m: 6.0
+
+# Gazebo 모드
+# - headless: true면 서버 모드로 메모리 사용량이 더 낮습니다.
+# - GUI 확인이 필요하면 false로 두고 실행 시 --gui를 사용하세요.
+headless: true
+
+# 검증 후 유지 여부
+# false면 상태 토픽/heartbeat 확인 후 자동 종료합니다.
+keep_running: false
