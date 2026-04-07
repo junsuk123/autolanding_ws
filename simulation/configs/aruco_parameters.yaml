@@ -1,8 +1,9 @@
 aruco_node:
   ros__parameters:
-    image_topic: /camera
-    camera_info_topic: /camera_info
+    # Default topic values (actual runtime values are overridden by orchestration config).
+    image_topic: /autolanding/drone1/camera
+    camera_info_topic: /autolanding/drone1/camera_info
     camera_frame: camera_link
     marker_size: 0.4
-    aruco_dictionary_id: DICT_4X4_50
-    marker_ids: [23]
+    aruco_dictionary_id: DICT_6X6_250
+    marker_ids: []

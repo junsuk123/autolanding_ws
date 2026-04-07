@@ -14,6 +14,22 @@ config: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/ai/configs/policy
 plots_dir: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/plots/paper
 world: /tmp/iris_runway_aruco_landing.sdf
 
+# 드론 네임스페이스 통합 설정
+# - 기본 규칙: drone_ns_prefix + primary_drone_index
+#   예) /autolanding/drone + 1 -> /autolanding/drone1
+# - camera/aruco 토픽은 기본적으로 drone_namespace에서 자동 파생됩니다.
+# - 특정 토픽만 예외가 필요하면 아래 토픽 키를 직접 지정하면 됩니다.
+drone_ns_prefix: /autolanding/drone
+primary_drone_index: 1
+drone_namespace: /autolanding/drone1
+camera_image_topic: /autolanding/drone1/camera
+camera_info_topic: /autolanding/drone1/camera_info
+aruco_markers_topic: /autolanding/drone1/aruco_markers
+aruco_poses_topic: /autolanding/drone1/aruco_poses
+
+# MAVROS 네임스페이스 접두사
+mavros_ns_prefix: /autolanding/mavros_w
+
 # 시뮬레이션 표시 옵션
 # gui=true 면 GUI 모드, headless=true 면 서버 모드
 # 둘 다 true로 두지 마세요. headless=true가 우선됩니다.
@@ -24,7 +40,42 @@ headless: false
 verbose: true
 no_plots: false
 
+# 비행 데모 옵션 (실제 arm/takeoff/고도 상승 검증)
+auto_flight_demo: true
+demo_takeoff_alt_m: 3.0
+# 0이면 workers 개수 기준 SERIAL0 포트(5760, 5770, ...)를 자동 순회합니다.
+demo_master_port: 0
+
+# 착륙 실행 옵션 (궤적 추종 후 LAND 명령)
+auto_landing_execute: true
+# 0이면 flight demo 성공 포트 또는 기본 후보(5760, 5762, ...)를 자동 순회합니다.
+landing_master_port: 0
+landing_timeout_s: 45.0
+# true면 착륙 타깃을 aruco_markers_topic 실측값에서 우선 추정합니다.
+# 실패 시 semantic_input.aruco.marker_center 또는 semantic_input.target 순으로 fallback 합니다.
+prefer_ros_aruco_target: true
+# true면 aruco_markers_topic 실측값이 끝까지 없을 경우 LAND를 수행하지 않고 즉시 중단합니다.
+# (사용자 요구: "ArUco 미검출 상태 착륙 금지")
+require_ros_aruco_for_landing: true
+# aruco_markers_topic --once 대기 시간(초)
+aruco_ros_target_timeout_s: 8.0
+# 초기 읽기 실패 후, 이륙/자세 변화로 마커가 FOV에 들어올 수 있는 구간에서 재시도할 최대 시간(초)
+aruco_ros_reacquire_window_s: 20.0
+# 재시도 주기(초)
+aruco_ros_reacquire_interval_s: 1.0
+# 재시도 1회당 ros2 topic echo 읽기 타임아웃(초)
+aruco_ros_reacquire_read_timeout_s: 2.0
+# auto | model | pid | png
+landing_controller: auto
+landing_pid_kp: 0.8
+landing_pid_kd: 0.15
+landing_png_gain: 2.0
+landing_max_xy_speed: 0.8
+landing_max_descent_speed: 0.7
+landing_min_descent_speed: 0.2
+
 # 수집/멀티드론 관련 파라미터
-workers: 3
-scenarios_per_worker: 2
+workers: 1
+# worker당 기본 수집 시나리오 개수(필요 시 자유롭게 수정)
+scenarios_per_worker: 10
 duration: 120

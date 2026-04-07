@@ -5,7 +5,7 @@ Multi-drone MAVROS launcher (Python-based, replaces launch_multi_mavros.sh)
 Launches independent MAVROS nodes for each drone with proper namespacing and FCU endpoint configuration.
 
 Usage:
-    python3 launch_multi_mavros_py.py [--count 3] [--start-index 1] [--ns-prefix /mavros_w] [--verbose]
+    python3 launch_multi_mavros_py.py [--count 3] [--start-index 1] [--ns-prefix /autolanding/mavros_w] [--verbose]
 """
 
 import argparse
@@ -133,7 +133,7 @@ def verify_mavros_packages():
 class MavrosLauncher:
     """Manager for multi-MAVROS processes."""
 
-    def __init__(self, count=3, ns_prefix="/mavros_w", verbose=False, start_index=1):
+    def __init__(self, count=3, ns_prefix="/autolanding/mavros_w", verbose=False, start_index=1):
         self.count = count
         self.ns_prefix = ns_prefix
         self.verbose = verbose
@@ -196,8 +196,8 @@ def main():
     parser.add_argument(
         "--ns-prefix",
         type=str,
-        default="/mavros_w",
-        help="Namespace prefix (default: /mavros_w)",
+        default="/autolanding/mavros_w",
+        help="Namespace prefix (default: /autolanding/mavros_w)",
     )
     parser.add_argument("--verbose", action="store_true", help="Verbose MAVROS logging")
 

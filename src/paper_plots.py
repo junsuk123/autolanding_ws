@@ -211,3 +211,64 @@ def generate_model_comparison_artifacts(
         'png': str(png_path),
         'pdf': str(pdf_path),
     }
+
+
+def generate_benchmark_comparison_artifacts(summary: dict[str, Any], output_dir: Path) -> dict[str, str]:
+    baseline = summary.get('baseline', {}).get('val', {})
+    proposed = summary.get('proposed_ontology_ai', {}).get('val', {})
+
+    if not baseline or not proposed:
+        raise ValueError('benchmark summary missing baseline/proposed validation metrics')
+
+    rows = [
+        {
+            'model': 'pure_ai_baseline',
+            'rmse': float(baseline.get('rmse', 0.0)),
+            'mae': float(baseline.get('mae', 0.0)),
+        },
+        {
+            'model': 'ontology_ai_proposed',
+            'rmse': float(proposed.get('rmse', 0.0)),
+            'mae': float(proposed.get('mae', 0.0)),
+        },
+    ]
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_path = output_dir / 'paper_benchmark_model_comparison_metrics.csv'
+    with open(csv_path, 'w', encoding='utf-8', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+    json_path = output_dir / 'paper_benchmark_model_comparison_metrics.json'
+    json_path.write_text(json.dumps(rows, indent=2), encoding='utf-8')
+
+    labels = [str(row['model']) for row in rows]
+    rmse = [float(row['rmse']) for row in rows]
+    mae = [float(row['mae']) for row in rows]
+
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5), constrained_layout=True)
+
+    axes[0].bar(labels, rmse, color=['#dc2626', '#0f766e'])
+    axes[0].set_title('Validation RMSE')
+    axes[0].set_ylabel('RMSE')
+
+    axes[1].bar(labels, mae, color=['#dc2626', '#0f766e'])
+    axes[1].set_title('Validation MAE')
+    axes[1].set_ylabel('MAE')
+
+    fig.suptitle('AutoLanding Benchmark: Ontology+AI vs Pure AI (8:2 Validation)', fontsize=12, fontweight='bold')
+    png_path = output_dir / 'paper_benchmark_model_comparison.png'
+    pdf_path = output_dir / 'paper_benchmark_model_comparison.pdf'
+    fig.savefig(png_path, dpi=220, bbox_inches='tight')
+    fig.savefig(pdf_path, bbox_inches='tight')
+    plt.close(fig)
+
+    return {
+        'csv': str(csv_path),
+        'json': str(json_path),
+        'png': str(png_path),
+        'pdf': str(pdf_path),
+    }

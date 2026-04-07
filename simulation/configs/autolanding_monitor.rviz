@@ -51,7 +51,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /aruco_markers
+        Value: /autolanding/drone1/aruco_markers
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/PoseArray
@@ -69,7 +69,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /aruco_poses
+        Value: /autolanding/drone1/aruco_poses
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -123,7 +123,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone1/odom
+        Value: /autolanding/drone1/odom
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -141,7 +141,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone2/odom
+        Value: /autolanding/drone2/odom
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -159,7 +159,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone3/odom
+        Value: /autolanding/drone3/odom
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -177,7 +177,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone4/odom
+        Value: /autolanding/drone4/odom
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -195,7 +195,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone5/odom
+        Value: /autolanding/drone5/odom
       Value: true
     - Angle Tolerance: 0.1
       Class: rviz_default_plugins/Odometry
@@ -213,7 +213,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone6/odom
+        Value: /autolanding/drone6/odom
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: true
@@ -233,7 +233,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone1/path
+        Value: /autolanding/drone1/path
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: true
@@ -253,7 +253,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone2/path
+        Value: /autolanding/drone2/path
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: true
@@ -273,7 +273,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone3/path
+        Value: /autolanding/drone3/path
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: true
@@ -293,7 +293,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone4/path
+        Value: /autolanding/drone4/path
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: false
@@ -313,7 +313,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone5/path
+        Value: /autolanding/drone5/path
       Value: true
     - Class: rviz_default_plugins/Path
       Enabled: false
@@ -333,7 +333,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /drone6/path
+        Value: /autolanding/drone6/path
       Value: true
   Enabled: true
   Global Options:

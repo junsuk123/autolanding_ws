@@ -33,12 +33,18 @@ class DroneState:
 
 
 class MultiDroneOdomPublisher(Node):
-    def __init__(self, workers: int, base_port: int, step: int, reconnect_backoff_s: float):
+    def __init__(self, workers: int, base_port: int, step: int, reconnect_backoff_s: float, topic_prefix: str):
         super().__init__("autolanding_multi_drone_odom")
         self.workers = workers
         self.base_port = base_port
         self.step = step
         self.reconnect_backoff_s = max(1.0, float(reconnect_backoff_s))
+        topic_prefix = str(topic_prefix).strip() if topic_prefix is not None else "/autolanding/drone"
+        if not topic_prefix:
+            topic_prefix = "/autolanding/drone"
+        if not topic_prefix.startswith("/"):
+            topic_prefix = "/" + topic_prefix
+        self.topic_prefix = topic_prefix.rstrip("/")
 
         self.states = {}
         self.links = {}
@@ -50,9 +56,10 @@ class MultiDroneOdomPublisher(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         for i in range(1, self.workers + 1):
+            drone_topic_ns = f"{self.topic_prefix}{i}"
             self.states[i] = DroneState()
-            self.odom_pubs[i] = self.create_publisher(Odometry, f"/drone{i}/odom", 10)
-            self.path_pubs[i] = self.create_publisher(Path, f"/drone{i}/path", 10)
+            self.odom_pubs[i] = self.create_publisher(Odometry, f"{drone_topic_ns}/odom", 10)
+            self.path_pubs[i] = self.create_publisher(Path, f"{drone_topic_ns}/path", 10)
             self.paths[i] = deque(maxlen=400)
             self.next_reconnect_time[i] = 0.0
             self.last_warn_time[i] = 0.0
@@ -233,10 +240,17 @@ def main():
     parser.add_argument("--base-master-port", type=int, default=5760)
     parser.add_argument("--step", type=int, default=10)
     parser.add_argument("--reconnect-backoff", type=float, default=8.0)
+    parser.add_argument("--topic-prefix", type=str, default="/autolanding/drone")
     args = parser.parse_args()
 
     rclpy.init()
-    node = MultiDroneOdomPublisher(max(1, args.workers), args.base_master_port, args.step, args.reconnect_backoff)
+    node = MultiDroneOdomPublisher(
+        max(1, args.workers),
+        args.base_master_port,
+        args.step,
+        args.reconnect_backoff,
+        args.topic_prefix,
+    )
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
