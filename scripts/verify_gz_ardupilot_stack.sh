@@ -44,6 +44,22 @@ if declare -F autl_export_comm_defaults >/dev/null 2>&1; then
   autl_export_comm_defaults
 fi
 
+# Guard against invalid ROS_DOMAIN_ID propagated as empty string.
+if [[ -z "${ROS_DOMAIN_ID:-}" ]]; then
+  export ROS_DOMAIN_ID=0
+elif ! [[ "${ROS_DOMAIN_ID}" =~ ^[0-9]+$ ]]; then
+  echo "[WARN] Invalid ROS_DOMAIN_ID='${ROS_DOMAIN_ID}', forcing 0"
+  export ROS_DOMAIN_ID=0
+fi
+
+# MATLAB batch sessions can inject incompatible Qt/OpenGL library paths.
+# Always prioritize system libs for Gazebo launcher paths.
+unset OSG_LD_LIBRARY_PATH || true
+unset QT_PLUGIN_PATH || true
+unset QML2_IMPORT_PATH || true
+unset QT_QPA_PLATFORMTHEME || true
+export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+
 add_path_var() {
   local var_name="$1"
   local candidate="$2"
@@ -121,7 +137,9 @@ aruco_scale_xy = float(os.environ.get("AUTOLANDING_ARUCO_SCALE_XY", "2.4"))
 aruco_scale_z = float(os.environ.get("AUTOLANDING_ARUCO_SCALE_Z", "1.0"))
 aruco_height = 0.5 * aruco_scale_z
 aruco_center_z = 0.5 * aruco_height
-drone_spawn_z = float(os.environ.get("AUTOLANDING_INITIAL_SPAWN_Z_M", "0.9"))
+drone_spawn_x = float(os.environ.get("AUTOLANDING_INITIAL_SPAWN_X_M", "1.0"))
+drone_spawn_y = float(os.environ.get("AUTOLANDING_INITIAL_SPAWN_Y_M", "0.35"))
+drone_spawn_z = float(os.environ.get("AUTOLANDING_INITIAL_SPAWN_Z_M", "0.15"))
 
 include_block = """
     <include>
@@ -136,7 +154,7 @@ iris_pose_re = re.compile(
   r'(<uri>model://iris_with_gimbal</uri>\s*<pose[^>]*>)([^<]+)(</pose>)',
   re.MULTILINE,
 )
-text = iris_pose_re.sub(rf'\g<1>0 0 {drone_spawn_z:.3f} 0 0 90\g<3>', text, count=1)
+text = iris_pose_re.sub(rf'\g<1>{drone_spawn_x:.3f} {drone_spawn_y:.3f} {drone_spawn_z:.3f} 0 0 90\g<3>', text, count=1)
 
 if '<name>aruco_landing_box</name>' not in text:
     marker = '</world>'
@@ -146,39 +164,140 @@ if '<name>aruco_landing_box</name>' not in text:
 
 out.write_text(text, encoding='utf-8')
 print(f"[INFO] Generated ArUco world: {out}")
+print(f"[INFO] Drone initial spawn pose set to x={drone_spawn_x:.3f}, y={drone_spawn_y:.3f}, z={drone_spawn_z:.3f}")
 PY
 }
 
 generate_aruco_world
+
+kill_all_gazebo_processes() {
+  echo "[INFO] Pre-cleanup: terminating all running Gazebo processes..."
+
+  # Broad patterns cover Gazebo Sim/Harmonic, classic Gazebo, and ign aliases.
+  local gz_patterns=(
+    "gz sim"
+    "gzserver"
+    "gzclient"
+    "ign gazebo"
+    "gazebo --"
+    "gazebo "
+  )
+
+  local pat=""
+  for pat in "${gz_patterns[@]}"; do
+    pkill -TERM -f "$pat" >/dev/null 2>&1 || true
+  done
+  pkill -TERM -f "rviz2|rviz" >/dev/null 2>&1 || true
+  sleep 2
+
+  for pat in "${gz_patterns[@]}"; do
+    pkill -KILL -f "$pat" >/dev/null 2>&1 || true
+  done
+  pkill -KILL -f "rviz2|rviz" >/dev/null 2>&1 || true
+  sleep 1
+
+  # Final safety net for any leftover gz-related processes.
+  pkill -KILL -f "(^|/)gz($| )" >/dev/null 2>&1 || true
+  pkill -KILL -f "(^|/)gazebo($| )" >/dev/null 2>&1 || true
+
+  # PID-level final sweep for stubborn children (gz sim server/gui, rviz).
+  local leftover_pids=""
+  leftover_pids="$(pgrep -f 'gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz' 2>/dev/null || true)"
+  if [[ -n "${leftover_pids}" ]]; then
+    echo "[WARN] Pre-cleanup: force killing leftover Gazebo/RViz PIDs: ${leftover_pids//$'\n'/ }"
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      kill -9 "$pid" >/dev/null 2>&1 || true
+    done <<< "$leftover_pids"
+  fi
+
+  if pgrep -f 'gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz' >/dev/null 2>&1; then
+    echo "[WARN] Pre-cleanup: some Gazebo/RViz processes still detected after force kill."
+  else
+    echo "[INFO] Pre-cleanup: Gazebo/RViz process cleanup complete."
+  fi
+}
 
 cleanup() {
   pkill -f "autolanding_mav_udp_relay.py" || true
   pkill -f "mavproxy.py" || true
   pkill -f "ros2 launch mavros px4.launch" || true
   pkill -f "mavros_node" || true
-  pkill -f "build/sitl/bin/arducopter" || true
-  pkill -f "gz sim" || true
+  pkill -f "rviz2" || true
+  pkill -f "rviz" || true
+  pkill -TERM -f "build/sitl/bin/arducopter" || true
+  pkill -TERM -f "(^|/)arducopter($| )" || true
+  pkill -f "sim_vehicle.py" || true
+  # Remove hidden SITL conflicts from other stacks (e.g., ardupilot_sitl launch).
+  fuser -k 5760/tcp >/dev/null 2>&1 || true
+  fuser -k 5762/tcp >/dev/null 2>&1 || true
+  fuser -k 14550/udp >/dev/null 2>&1 || true
+  sleep 1
+  pkill -KILL -f "(^|/)arducopter($| )" || true
+  kill_all_gazebo_processes
 }
 
 cleanup
 sleep 1
 
 cd "${WORKDIR}"
-GZ_BIN=(env -u LD_LIBRARY_PATH /usr/bin/gz)
+GZ_BIN=(/usr/bin/gz)
 GZ_FLAGS=(-v4 -r)
 
 # Prefer GUI when explicitly requested, even from MATLAB shells where DISPLAY may be empty.
 if [[ "${AUTOLANDING_FORCE_HEADLESS:-0}" != "1" ]]; then
   if [[ -z "${DISPLAY:-}" ]]; then
-    export DISPLAY=:0
+    if [[ -n "${AUTOLANDING_DISPLAY:-}" ]]; then
+      export DISPLAY="${AUTOLANDING_DISPLAY}"
+    else
+      active_disp="$(who 2>/dev/null | sed -n 's/.*(\(:[0-9][0-9]*\)).*/\1/p' | head -n1)"
+      if [[ -n "${active_disp}" ]]; then
+        export DISPLAY="${active_disp}"
+      elif compgen -G "/tmp/.X11-unix/X*" >/dev/null 2>&1; then
+        first_xsock="$(ls /tmp/.X11-unix/X* 2>/dev/null | head -n1)"
+        if [[ -n "${first_xsock}" ]]; then
+          export DISPLAY=":$(basename "${first_xsock}" | sed 's/^X//')"
+        else
+          export DISPLAY=:0
+        fi
+      else
+        export DISPLAY=:0
+      fi
+    fi
   fi
-  if [[ -z "${XAUTHORITY:-}" && -f "$HOME/.Xauthority" ]]; then
-    export XAUTHORITY="$HOME/.Xauthority"
+  if [[ -z "${XAUTHORITY:-}" ]]; then
+    if [[ -f "/run/user/$(id -u)/gdm/Xauthority" ]]; then
+      export XAUTHORITY="/run/user/$(id -u)/gdm/Xauthority"
+    elif [[ -f "$HOME/.Xauthority" ]]; then
+      export XAUTHORITY="$HOME/.Xauthority"
+    fi
   fi
   # MATLAB batch sessions can inherit Wayland-heavy env that hides GUI windows.
   export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+  export QT_QPA_PLATFORM_PLUGIN_PATH="${QT_QPA_PLATFORM_PLUGIN_PATH:-/usr/lib/x86_64-linux-gnu/qt5/plugins}"
+  export LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH:-}"
+  export LIBGL_ALWAYS_INDIRECT="${LIBGL_ALWAYS_INDIRECT:-0}"
+  export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-graphics,compute}"
+  # Default to hardware rendering. Force software mode only when explicitly requested.
+  if [[ "${AUTOLANDING_GUI_SOFTWARE:-0}" == "1" ]]; then
+    if [[ -f "/usr/lib/x86_64-linux-gnu/dri/llvmpipe_dri.so" || -f "/usr/lib/dri/llvmpipe_dri.so" ]]; then
+      export LIBGL_ALWAYS_SOFTWARE=1
+      export MESA_LOADER_DRIVER_OVERRIDE="${MESA_LOADER_DRIVER_OVERRIDE:-llvmpipe}"
+      echo "[INFO] GUI rendering mode: software (llvmpipe)"
+    else
+      echo "[WARN] AUTOLANDING_GUI_SOFTWARE=1 but llvmpipe is not installed. Falling back to hardware rendering."
+      unset LIBGL_ALWAYS_SOFTWARE || true
+      unset MESA_LOADER_DRIVER_OVERRIDE || true
+    fi
+  else
+    unset LIBGL_ALWAYS_SOFTWARE || true
+    unset MESA_LOADER_DRIVER_OVERRIDE || true
+    echo "[INFO] GUI rendering mode: hardware"
+  fi
   export GDK_BACKEND="${GDK_BACKEND:-x11}"
+  export NO_AT_BRIDGE=1
   unset WAYLAND_DISPLAY
+  echo "[INFO] GUI env: DISPLAY=${DISPLAY:-<unset>} XAUTHORITY=${XAUTHORITY:-<unset>}"
 fi
 
 if [[ "${AUTOLANDING_FORCE_HEADLESS:-0}" == "1" ]]; then
@@ -193,11 +312,13 @@ GZ_PID=$!
 sleep 5
 
 if ! ps -p "${GZ_PID}" >/dev/null 2>&1; then
-  if [[ "${GZ_FLAGS[*]}" != *"-s"* ]]; then
+  if [[ "${GZ_FLAGS[*]}" != *"-s"* && "${AUTOLANDING_FORCE_GUI:-0}" != "1" ]]; then
     echo "[WARN] Gazebo GUI failed to start. Falling back to headless mode." | tee -a "${GZ_LOG}"
     nohup setsid "${GZ_BIN[@]}" sim -s -v4 -r "${GZ_WORLD}" >>"${GZ_LOG}" 2>&1 < /dev/null &
     GZ_PID=$!
     sleep 4
+  elif [[ "${AUTOLANDING_FORCE_GUI:-0}" == "1" ]]; then
+    echo "[FAIL] Gazebo GUI failed to start and AUTOLANDING_FORCE_GUI=1 is set." | tee -a "${GZ_LOG}"
   fi
 fi
 

@@ -1,0 +1,29 @@
+{
+  "models": [
+    "Ontology+AI (Hybrid)",
+    "Pure AI (Baseline)"
+  ],
+  "metrics": [
+    {
+      "accuracy": 1,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "TP": 0,
+      "FP": 0,
+      "FN": 0,
+      "TN": 80
+    },
+    {
+      "accuracy": 1,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "TP": 0,
+      "FP": 0,
+      "FN": 0,
+      "TN": 80
+    }
+  ],
+  "summary_text": "\n============================================================\nMODEL COMPARISON RESULTS\n============================================================\n\nOntology+AI (Hybrid):\n  Accuracy:  1.0000\n  Precision: 0.0000\n  Recall:    0.0000\n  F1-Score:  0.0000\n  TP: 0, FP: 0, FN: 0, TN: 80\n\nPure AI (Baseline):\n  Accuracy:  1.0000\n  Precision: 0.0000\n  Recall:    0.0000\n  F1-Score:  0.0000\n  TP: 0, FP: 0, FN: 0, TN: 80\n\n------------------------------------------------------------\nRESULT: Tie (both 1.0000 accuracy)\n============================================================\n"
+}

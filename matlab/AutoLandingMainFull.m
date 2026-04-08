@@ -15,6 +15,9 @@ function summary = AutoLandingMainFull(varargin)
 %       'auto_flight_demo', true, ...
 %       'drone_spawn_above_pad_m', 0.35, ...
 %       'landing_pad_size_xy', 2.4, ...
+%       'initial_spawn_x_m', 1.0, ...
+%       'initial_spawn_y_m', 0.35, ...
+%       'initial_spawn_z_m', 0.15, ...
 %       'demo_takeoff_alt_m', 1.2, ...
 %       'control_backend', 'mavros'));
 %
@@ -114,6 +117,15 @@ for k = 1:2:numel(varargin)
         case {'landing_pad_size_xy'}
             params.landing_pad_size_xy = double(val);
             params = localMarkExplicit(params, 'landing_pad_size_xy');
+        case {'initial_spawn_x_m'}
+            params.initial_spawn_x_m = double(val);
+            params = localMarkExplicit(params, 'initial_spawn_x_m');
+        case {'initial_spawn_y_m'}
+            params.initial_spawn_y_m = double(val);
+            params = localMarkExplicit(params, 'initial_spawn_y_m');
+        case {'initial_spawn_z_m'}
+            params.initial_spawn_z_m = double(val);
+            params = localMarkExplicit(params, 'initial_spawn_z_m');
         case {'demo_takeoff_alt_m'}
             params.demo_takeoff_alt_m = double(val);
             params = localMarkExplicit(params, 'demo_takeoff_alt_m');
@@ -156,6 +168,9 @@ params.enable_visualization = true;
 params.auto_flight_demo = false;
 params.drone_spawn_above_pad_m = 0.35;
 params.landing_pad_size_xy = 2.4;
+params.initial_spawn_x_m = 1.0;
+params.initial_spawn_y_m = 0.35;
+params.initial_spawn_z_m = 0.15;
 params.demo_takeoff_alt_m = 1.2;
 params.control_backend = 'mavros';
 params.mavlink_precheck_timeout_s = 90.0;
@@ -200,18 +215,62 @@ if ~isfile(launcher)
 end
 
 fprintf('[AutoLandingMainFull] Preparing Gazebo/SITL stack...\n');
-force_headless = true;
+localPreKillSimulationProcesses();
+headless_explicit = localIsExplicitRunField(run_params, 'headless');
+force_headless = false;
 if nargin >= 2 && isstruct(run_params) && isfield(run_params, 'headless')
     force_headless = logical(run_params.headless);
 end
-if force_headless
-    cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=1 bash "%s"', launcher);
+
+% Default behavior should allow launcher auto-fallback (GUI -> headless)
+% unless caller explicitly requested headless/gui.
+if headless_explicit && force_headless
+    cmd = sprintf(['AUTOLANDING_INITIAL_SPAWN_X_M=%.3f AUTOLANDING_INITIAL_SPAWN_Y_M=%.3f ' ...
+        'AUTOLANDING_INITIAL_SPAWN_Z_M=%.3f AUTOLANDING_FORCE_HEADLESS=1 bash "%s"'], ...
+        double(run_params.initial_spawn_x_m), double(run_params.initial_spawn_y_m), ...
+        double(run_params.initial_spawn_z_m), launcher);
+elseif headless_explicit && ~force_headless
+    cmd = sprintf(['AUTOLANDING_INITIAL_SPAWN_X_M=%.3f AUTOLANDING_INITIAL_SPAWN_Y_M=%.3f ' ...
+        'AUTOLANDING_INITIAL_SPAWN_Z_M=%.3f AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 bash "%s"'], ...
+        double(run_params.initial_spawn_x_m), double(run_params.initial_spawn_y_m), ...
+        double(run_params.initial_spawn_z_m), launcher);
 else
-    cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=0 bash "%s"', launcher);
+    cmd = sprintf(['AUTOLANDING_INITIAL_SPAWN_X_M=%.3f AUTOLANDING_INITIAL_SPAWN_Y_M=%.3f ' ...
+        'AUTOLANDING_INITIAL_SPAWN_Z_M=%.3f bash "%s"'], ...
+        double(run_params.initial_spawn_x_m), double(run_params.initial_spawn_y_m), ...
+        double(run_params.initial_spawn_z_m), launcher);
 end
 [status, output] = system(cmd);
 if status ~= 0
     error('[AutoLandingMainFull] Failed to prepare Gazebo/SITL stack (exit=%d): %s', status, strtrim(output));
 end
 fprintf('[AutoLandingMainFull] Gazebo/SITL stack is ready.\n');
+end
+
+function tf = localIsExplicitRunField(run_params, field_name)
+tf = false;
+if nargin < 2 || ~isstruct(run_params)
+    return;
+end
+if ~isfield(run_params, 'explicit_fields__') || ~iscell(run_params.explicit_fields__)
+    return;
+end
+target = char(string(field_name));
+fields = cellfun(@char, run_params.explicit_fields__, 'UniformOutput', false);
+tf = any(strcmp(fields, target));
+end
+
+function localPreKillSimulationProcesses()
+% Extra safety: terminate stale stack processes before launcher cleanup runs.
+
+cleanup_cmd = [ ...
+    'bash -lc ''set +e; ' ...
+    'pkill -TERM -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
+    'fuser -k 5760/tcp >/dev/null 2>&1 || true; ' ...
+    'fuser -k 5762/tcp >/dev/null 2>&1 || true; ' ...
+    'fuser -k 14550/udp >/dev/null 2>&1 || true; ' ...
+    'sleep 1; ' ...
+    'pkill -KILL -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
+    'exit 0'''];
+system(cleanup_cmd);
 end

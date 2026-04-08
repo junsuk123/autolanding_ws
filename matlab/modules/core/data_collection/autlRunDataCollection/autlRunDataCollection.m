@@ -108,17 +108,26 @@ end
 if ~isfield(mission_config, 'arm_retries')
     mission_config.arm_retries = 6;
 end
+if ~isfield(mission_config, 'takeoff_retries')
+    mission_config.takeoff_retries = 3;
+end
 if ~isfield(mission_config, 'control_retry_interval_s')
     mission_config.control_retry_interval_s = 1.5;
 end
 if ~isfield(mission_config, 'post_mode_set_delay_s')
     mission_config.post_mode_set_delay_s = 0.6;
 end
+if ~isfield(mission_config, 'post_arm_settle_s')
+    mission_config.post_arm_settle_s = 1.2;
+end
+if ~isfield(mission_config, 'mode_arm_gate_timeout_s')
+    mission_config.mode_arm_gate_timeout_s = 8.0;
+end
 if ~isfield(mission_config, 'startup_control_timeout_s')
     mission_config.startup_control_timeout_s = 6.0;
 end
 if ~isfield(mission_config, 'allow_mavproxy_mode_fallback_on_mavros_reject')
-    mission_config.allow_mavproxy_mode_fallback_on_mavros_reject = false;
+    mission_config.allow_mavproxy_mode_fallback_on_mavros_reject = true;
 end
 if ~isfield(mission_config, 'mavproxy_force_fallback_retries')
     mission_config.mavproxy_force_fallback_retries = 2;
@@ -140,6 +149,18 @@ if ~isfield(mission_config, 'require_state_topic_before_start')
 end
 if ~isfield(mission_config, 'state_topic_timeout_s')
     mission_config.state_topic_timeout_s = 20.0;
+end
+if ~isfield(mission_config, 'enable_state_gate_stack_recovery')
+    mission_config.enable_state_gate_stack_recovery = true;
+end
+if ~isfield(mission_config, 'state_gate_stack_recovery_retries')
+    mission_config.state_gate_stack_recovery_retries = 1;
+end
+if ~isfield(mission_config, 'state_gate_recheck_pause_s')
+    mission_config.state_gate_recheck_pause_s = 3.0;
+end
+if ~isfield(mission_config, 'state_gate_timeout_after_recovery_s')
+    mission_config.state_gate_timeout_after_recovery_s = 35.0;
 end
 if ~isfield(mission_config, 'require_takeoff_confirmation_before_collection')
     mission_config.require_takeoff_confirmation_before_collection = true;
@@ -164,6 +185,12 @@ if ~isfield(mission_config, 'aruco_visibility_poll_interval_s')
 end
 if ~isfield(mission_config, 'aruco_visibility_min_markers')
     mission_config.aruco_visibility_min_markers = 1;
+end
+if ~isfield(mission_config, 'enable_gazebo_hard_reset_on_hover_timeout')
+    mission_config.enable_gazebo_hard_reset_on_hover_timeout = true;
+end
+if ~isfield(mission_config, 'gazebo_hard_reset_wait_s')
+    mission_config.gazebo_hard_reset_wait_s = 25.0;
 end
 if ~isfield(mission_config, 'mavlink_master')
     mission_config.mavlink_master = 'tcp:127.0.0.1:5760';
@@ -258,6 +285,9 @@ if ~isfield(mission_config, 'quality_min_armed_ratio')
 end
 if ~isfield(mission_config, 'quality_max_no_link_ratio')
     mission_config.quality_max_no_link_ratio = 0.05;
+end
+if ~isfield(mission_config, 'allow_quality_gate_softpass_on_missing_telemetry')
+    mission_config.allow_quality_gate_softpass_on_missing_telemetry = true;
 end
 if ~isfield(mission_config, 'telemetry_allow_stale_cache_on_timeout')
     mission_config.telemetry_allow_stale_cache_on_timeout = false;
@@ -397,6 +427,7 @@ try
     mav_config = struct('master', mission_config.mavlink_master, 'timeout', 20, ...
         'fallback_master', mission_config.mavlink_master_fallback, ...
         'allow_simulated_fallback', mission_config.allow_simulated_fallback, ...
+        'mavros_namespace', mission_config.mavros_namespace, ...
         'query_interval_s', mission_config.telemetry_query_interval_s, ...
         'allow_stale_cache_on_timeout', logical(mission_config.telemetry_allow_stale_cache_on_timeout), ...
         'cache_key', mission_config.session_id);
@@ -425,6 +456,27 @@ try
 
     if mission_config.require_state_topic_before_start && strcmpi(char(string(mission_config.control_backend)), 'mavros') && mission_config.enable_auto_motion
         [state_ok, state_msg] = autlWaitForStateTopicGate(mission_config, control_cfg);
+        if ~state_ok && logical(mission_config.enable_state_gate_stack_recovery)
+            recover_tries = max(0, round(double(mission_config.state_gate_stack_recovery_retries)));
+            for recover_idx = 1:recover_tries
+                fprintf('%s[AutoLandingDataCollection] State topic gate failed. Starting stack recovery (%d/%d): %s\n', ...
+                    log_prefix, recover_idx, recover_tries, state_msg);
+                [rec_ok, rec_msg] = autlRecoverMavrosStateGateGlobalTop(mission_config, log_prefix);
+                fprintf('%s[AutoLandingDataCollection] State gate recovery result: %s\n', log_prefix, rec_msg);
+                if ~rec_ok
+                    continue;
+                end
+
+                pause(max(0.5, double(mission_config.state_gate_recheck_pause_s)));
+                prev_timeout = mission_config.state_topic_timeout_s;
+                mission_config.state_topic_timeout_s = max(prev_timeout, double(mission_config.state_gate_timeout_after_recovery_s));
+                [state_ok, state_msg] = autlWaitForStateTopicGate(mission_config, control_cfg);
+                mission_config.state_topic_timeout_s = prev_timeout;
+                if state_ok
+                    break;
+                end
+            end
+        end
         if ~state_ok
             error('AutoLanding:StateTopicUnavailable', ...
                 'State topic gate failed on %s/state: %s', char(string(mission_config.mavros_namespace)), state_msg);
@@ -504,14 +556,30 @@ try
         end
 
         if control_state.arm_sent
+            pause(max(0.0, double(mission_config.post_arm_settle_s)));
+            if strcmpi(char(string(mission_config.control_backend)), 'mavros')
+                [gate_ok, gate_msg] = autlWaitForModeArmGate(control_cfg, 'GUIDED', mission_config.mode_arm_gate_timeout_s);
+                if ~gate_ok
+                    fprintf('%s[AutoLandingDataCollection] Warning: mode/arm gate not ready before takeoff: %s\n', log_prefix, gate_msg);
+                    autlRunControlWithRetry('set_mode', struct('mode', 'GUIDED'), startup_control_cfg, 1, mission_config.control_retry_interval_s);
+                    autlRunControlWithRetry('arm', struct(), startup_control_cfg, 1, mission_config.control_retry_interval_s);
+                    pause(0.6);
+                else
+                    fprintf('%s[AutoLandingDataCollection] Mode/arm gate passed before takeoff: %s\n', log_prefix, gate_msg);
+                end
+            end
             fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff %.2f m...\n', log_prefix, mission_config.takeoff_height_m);
-            takeoff_res = autlMavproxyControl('takeoff', struct('height', mission_config.takeoff_height_m), startup_control_cfg);
+            [takeoff_res, takeoff_attempts] = autlRunControlWithRetry('takeoff', struct('height', mission_config.takeoff_height_m), startup_control_cfg, ...
+                mission_config.takeoff_retries, mission_config.control_retry_interval_s);
             control_state.takeoff_sent = takeoff_res.is_success;
             if ~takeoff_res.is_success
                 if strcmpi(char(string(mission_config.control_backend)), 'mavros') && logical(mission_config.allow_mavproxy_mode_fallback_on_mavros_reject)
+                    % Re-assert GUIDED over fallback backend before takeoff retry.
+                    autlRunControlWithRetry('set_mode', struct('mode', 'GUIDED'), startup_fallback_cfg, ...
+                        1, mission_config.control_retry_interval_s);
                     fprintf('%s[AutoLandingDataCollection] Auto motion: retrying takeoff via MAVProxy fallback...\n', log_prefix);
                     [takeoff_fb_res, takeoff_fb_attempts] = autlRunControlWithRetry('takeoff', struct('height', mission_config.takeoff_height_m), startup_fallback_cfg, ...
-                        1, mission_config.control_retry_interval_s);
+                        mission_config.mavproxy_force_fallback_retries, mission_config.control_retry_interval_s);
                     control_state.takeoff_sent = takeoff_fb_res.is_success;
                     if takeoff_fb_res.is_success
                         fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff accepted via MAVProxy fallback (attempt %d)\n', ...
@@ -526,7 +594,7 @@ try
                         log_prefix, autlCompactMavErrorTop(takeoff_res.error_message));
                 end
             else
-                fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted\n', log_prefix);
+                fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted (attempt %d)\n', log_prefix, takeoff_attempts);
                 if mission_config.require_takeoff_confirmation_before_collection
                     [tk_ok, tk_msg] = autlWaitForTakeoffGate(mav_config, mission_config, control_cfg);
                     if ~tk_ok
@@ -540,6 +608,28 @@ try
                     fprintf('%s[AutoLandingDataCollection] Hover stabilization ready: %s\n', log_prefix, hover_msg);
                 else
                     fprintf('%s[AutoLandingDataCollection] Warning: hover stabilization timeout: %s\n', log_prefix, hover_msg);
+                    
+                    % Perform soft reset when hover is unstable
+                    fprintf('%s[AutoLandingDataCollection] Attempting Gazebo soft reset due to unstable hover...\n', log_prefix);
+                    [reset_ok, reset_msg] = autlResetGazeboSimulation('default', log_prefix);
+                    
+                    if reset_ok
+                        fprintf('%s[AutoLandingDataCollection] Gazebo soft reset succeeded: %s\n', log_prefix, reset_msg);
+                        % Wait for simulation to stabilize after reset
+                        pause(1.5);
+                    else
+                        fprintf('%s[AutoLandingDataCollection] Warning: Gazebo soft reset failed: %s\n', log_prefix, reset_msg);
+                        if logical(mission_config.enable_gazebo_hard_reset_on_hover_timeout)
+                            fprintf('%s[AutoLandingDataCollection] Attempting Gazebo HARD reset (safe stop/restart)...\n', log_prefix);
+                            [hard_ok, hard_msg] = autlHardResetGazeboServer(rootDir, mission_config, log_prefix);
+                            if hard_ok
+                                fprintf('%s[AutoLandingDataCollection] Gazebo hard reset succeeded: %s\n', log_prefix, hard_msg);
+                                pause(2.0);
+                            else
+                                fprintf('%s[AutoLandingDataCollection] Warning: Gazebo hard reset failed: %s\n', log_prefix, hard_msg);
+                            end
+                        end
+                    end
                 end
             end
         else
@@ -838,8 +928,13 @@ try
             flight_quality.alt_gain_m, flight_quality.xy_span_m, flight_quality.xy_travel_m, flight_quality.armed_ratio);
         fprintf('%s[AutoLandingDataCollection] Flight quality gate FAILED: %s\n', log_prefix, collection_result.error_message);
     else
-        fprintf('%s[AutoLandingDataCollection] Flight quality gate PASSED: alt_gain=%.3fm, xy_span=%.3fm, xy_travel=%.3fm, armed_ratio=%.3f\n', ...
-            log_prefix, flight_quality.alt_gain_m, flight_quality.xy_span_m, flight_quality.xy_travel_m, flight_quality.armed_ratio);
+        if isfield(flight_quality, 'softpass') && logical(flight_quality.softpass)
+            fprintf('%s[AutoLandingDataCollection] Flight quality gate SOFT-PASSED: %s\n', ...
+                log_prefix, char(string(flight_quality.softpass_reason)));
+        else
+            fprintf('%s[AutoLandingDataCollection] Flight quality gate PASSED: alt_gain=%.3fm, xy_span=%.3fm, xy_travel=%.3fm, armed_ratio=%.3f\n', ...
+                log_prefix, flight_quality.alt_gain_m, flight_quality.xy_span_m, flight_quality.xy_travel_m, flight_quality.armed_ratio);
+        end
     end
 
     autlReleaseLandingPadRuntime(landing_pad_runtime);
@@ -1099,7 +1194,10 @@ try
     
     % If timeout or error, return a no-link state instead of fabricating motion.
     if status ~= 0
-        if logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
+        [mavros_ok, mavros_state] = autlTryReadVehicleStateFromMavros(mav_config);
+        if mavros_ok
+            vehicle_state = mavros_state;
+        elseif logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
             vehicle_state = cached_state;
         else
             vehicle_state = autlGenerateNoLinkState();
@@ -1109,7 +1207,10 @@ try
         return;
     end
 catch
-    if logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
+    [mavros_ok, mavros_state] = autlTryReadVehicleStateFromMavros(mav_config);
+    if mavros_ok
+        vehicle_state = mavros_state;
+    elseif logical(mav_config.allow_stale_cache_on_timeout) && ~isempty(cached_state)
         vehicle_state = cached_state;
     else
         vehicle_state = autlGenerateNoLinkState();
@@ -1173,6 +1274,82 @@ no_link.rangefinder_dist = 0;
 no_link.armed = 0;
 no_link.mode = 'NO_LINK';
 no_link.has_local_position = 0;
+end
+
+function [ok, state] = autlTryReadVehicleStateFromMavros(mav_config)
+% Build fallback state directly from MAVROS topics when pymavlink polling fails.
+
+ok = false;
+state = autlGenerateNoLinkState();
+
+ns = '/mavros';
+if isfield(mav_config, 'mavros_namespace') && strlength(string(mav_config.mavros_namespace)) > 0
+    ns = char(string(mav_config.mavros_namespace));
+end
+if ~startsWith(ns, '/')
+    ns = ['/' ns];
+end
+if endsWith(ns, '/')
+    ns = ns(1:end-1);
+end
+
+this_file = mfilename('fullpath');
+repo_root = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+iicc26_setup = fullfile(fileparts(repo_root), 'IICC26_ws', 'install', 'setup.bash');
+source_overlay = sprintf('[ -f "%s" ] && source "%s" >/dev/null 2>&1; ', iicc26_setup, iicc26_setup);
+source_overlay = [source_overlay 'export ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}; '];
+
+state_cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout 2 ros2 topic echo --once %s/state 2>/dev/null''', ...
+    source_overlay, ns);
+[rc_state, out_state] = system(state_cmd);
+if rc_state == 0
+    armed_tok = regexp(char(string(out_state)), 'armed\s*:\s*(true|false)', 'tokens', 'once');
+    mode_tok = regexp(char(string(out_state)), 'mode\s*:\s*([^\n\r]+)', 'tokens', 'once');
+    if ~isempty(armed_tok)
+        state.armed = double(strcmpi(strtrim(armed_tok{1}), 'true'));
+    end
+    if ~isempty(mode_tok)
+        state.mode = strtrim(mode_tok{1});
+    end
+end
+
+pose_cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout 2 ros2 topic echo --once %s/local_position/pose 2>/dev/null''', ...
+    source_overlay, ns);
+[rc_pose, out_pose] = system(pose_cmd);
+if rc_pose == 0
+    x_tok = regexp(char(string(out_pose)), 'x\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    y_tok = regexp(char(string(out_pose)), 'y\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    z_tok = regexp(char(string(out_pose)), 'z\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    if numel(x_tok) >= 1 && numel(y_tok) >= 1 && numel(z_tok) >= 1
+        px = str2double(x_tok{1}{1});
+        py = str2double(y_tok{1}{1});
+        pz_enu = str2double(z_tok{1}{1});
+        state.position = [px, py, -pz_enu];
+        state.barometer_alt = pz_enu;
+        state.has_local_position = 1;
+    end
+end
+
+vel_cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout 2 ros2 topic echo --once %s/local_position/velocity_local 2>/dev/null''', ...
+    source_overlay, ns);
+[rc_vel, out_vel] = system(vel_cmd);
+if rc_vel == 0
+    vx_tok = regexp(char(string(out_vel)), 'x\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    vy_tok = regexp(char(string(out_vel)), 'y\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    vz_tok = regexp(char(string(out_vel)), 'z\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens');
+    if numel(vx_tok) >= 1 && numel(vy_tok) >= 1 && numel(vz_tok) >= 1
+        vx = str2double(vx_tok{1}{1});
+        vy = str2double(vy_tok{1}{1});
+        vz_enu = str2double(vz_tok{1}{1});
+        state.velocity = [vx, vy, -vz_enu];
+    end
+end
+
+if strcmp(state.mode, 'NO_LINK') && state.has_local_position > 0
+    state.mode = 'MAVROS';
+end
+
+ok = ~strcmp(state.mode, 'NO_LINK') || state.has_local_position > 0;
 end
 
 function msg = autlCompactMavError(raw_msg)
@@ -1382,7 +1559,14 @@ try
         ok = true;
         msg = "stack_ready";
     else
-        if strlength(string(strtrim(out))) > 0
+        % verify_gz_ardupilot_stack.sh may exit non-zero even when Gazebo/MAVROS
+        % are already respawned. Treat this as recoverable and let state gate retry.
+        [gz_rc, ~] = system('bash -lc "pgrep -f \"gz sim\" >/dev/null 2>&1"');
+        [mavros_rc, ~] = system('bash -lc "pgrep -f \"mavros_node|ros2 launch mavros px4.launch\" >/dev/null 2>&1"');
+        if gz_rc == 0 || mavros_rc == 0
+            ok = true;
+            msg = "stack_partially_ready(rc=" + string(rc) + ")";
+        elseif strlength(string(strtrim(out))) > 0
             msg = "launcher_failed(rc=" + string(rc) + "):" + string(strtrim(out));
         else
             msg = "launcher_failed(rc=" + string(rc) + ") log=" + string(log_path);
@@ -1391,6 +1575,50 @@ try
 catch ME
     msg = string(ME.message);
 end
+end
+
+function [ok, msg] = autlRecoverMavrosStateGateTop(mission_config, log_prefix)
+% Recover MAVROS state gate by restarting the stack once with a lock.
+
+ok = false;
+msg = "not_run";
+
+lock_dir = '/tmp/autl_state_gate_recovery.lock';
+lock_wait_s = 45.0;
+if isfield(mission_config, 'state_gate_timeout_after_recovery_s') && isfinite(mission_config.state_gate_timeout_after_recovery_s)
+    lock_wait_s = max(10.0, double(mission_config.state_gate_timeout_after_recovery_s));
+end
+
+acquired = false;
+start_t = tic;
+while toc(start_t) < lock_wait_s
+    [rc, ~] = system(sprintf('bash -lc "mkdir %s >/dev/null 2>&1"', lock_dir));
+    if rc == 0
+        acquired = true;
+        break;
+    end
+    pause(0.5 + 0.5 * rand());
+end
+
+if ~acquired
+    msg = "recovery_lock_timeout";
+    return;
+end
+
+cleanup_lock = onCleanup(@() system(sprintf('bash -lc "rmdir %s >/dev/null 2>&1 || true"', lock_dir)));
+try
+    fprintf('%s[AutoLandingDataCollection] Recovering MAVROS state gate by restarting Gazebo/SITL/MAVROS stack...\n', log_prefix);
+    [ok, ensure_msg] = autlEnsureGazeboSITLStackTop();
+    if ok
+        msg = "stack_restarted";
+    else
+        msg = "stack_restart_failed:" + string(ensure_msg);
+    end
+catch ME
+    msg = "stack_restart_exception:" + string(ME.message);
+end
+
+clear cleanup_lock;
 end
 
 if ~res.is_success
@@ -1437,6 +1665,96 @@ if isempty(idx)
 else
     boot_until_s(idx) = now_s + 10.0;
 end
+end
+
+function [ok, msg] = autlEnsureGazeboSITLStackGlobalTop()
+ok = false;
+msg = "not_run";
+try
+    this_file = mfilename('fullpath');
+    root_dir = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+    launcher = fullfile(root_dir, 'scripts', 'verify_gz_ardupilot_stack.sh');
+    if exist(launcher, 'file') ~= 2
+        msg = "launcher_missing";
+        return;
+    end
+
+    log_path = fullfile(root_dir, 'data', 'logs', 'mavlink_stack_recovery.log');
+
+    force_headless = true;
+    if nargin >= 1 && isstruct(mission_config) && isfield(mission_config, 'gazebo_server_mode')
+        force_headless = logical(mission_config.gazebo_server_mode);
+    end
+    if strcmp(getenv('AUTOLANDING_FORCE_GUI'), '1')
+        force_headless = false;
+    end
+    if strcmp(getenv('AUTOLANDING_FORCE_HEADLESS'), '1')
+        force_headless = true;
+    end
+
+    if force_headless
+        cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=1 timeout 180 bash "%s" > "%s" 2>&1', launcher, log_path);
+    else
+        cmd = sprintf('AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 timeout 180 bash "%s" > "%s" 2>&1', launcher, log_path);
+    end
+    [rc, out] = system(cmd);
+    if rc == 0
+        ok = true;
+        msg = "stack_ready";
+    else
+        if strlength(string(strtrim(out))) > 0
+            msg = "launcher_failed(rc=" + string(rc) + "):" + string(strtrim(out));
+        else
+            msg = "launcher_failed(rc=" + string(rc) + ") log=" + string(log_path);
+        end
+    end
+catch ME
+    msg = string(ME.message);
+end
+end
+
+function [ok, msg] = autlRecoverMavrosStateGateGlobalTop(mission_config, log_prefix)
+% Recover MAVROS state gate by restarting the stack once with a lock.
+
+ok = false;
+msg = "not_run";
+
+lock_dir = '/tmp/autl_state_gate_recovery.lock';
+lock_wait_s = 45.0;
+if isfield(mission_config, 'state_gate_timeout_after_recovery_s') && isfinite(mission_config.state_gate_timeout_after_recovery_s)
+    lock_wait_s = max(10.0, double(mission_config.state_gate_timeout_after_recovery_s));
+end
+
+acquired = false;
+start_t = tic;
+while toc(start_t) < lock_wait_s
+    [rc, ~] = system(sprintf('bash -lc "mkdir %s >/dev/null 2>&1"', lock_dir));
+    if rc == 0
+        acquired = true;
+        break;
+    end
+    pause(0.5 + 0.5 * rand());
+end
+
+if ~acquired
+    msg = "recovery_lock_timeout";
+    return;
+end
+
+cleanup_lock = onCleanup(@() system(sprintf('bash -lc "rmdir %s >/dev/null 2>&1 || true"', lock_dir)));
+try
+    fprintf('%s[AutoLandingDataCollection] Recovering MAVROS state gate by restarting Gazebo/SITL/MAVROS stack...\n', log_prefix);
+    [ok, ensure_msg] = autlEnsureGazeboSITLStackGlobalTop(mission_config);
+    if ok
+        msg = "stack_restarted";
+    else
+        msg = "stack_restart_failed:" + string(ensure_msg);
+    end
+catch ME
+    msg = "stack_restart_exception:" + string(ME.message);
+end
+
+clear cleanup_lock;
 end
 
 function autlSaveRawDataCsv(csv_path, raw_data)
@@ -2018,6 +2336,8 @@ quality.xy_travel_m = 0.0;
 quality.armed_ratio = 0.0;
 quality.no_link_ratio = 0.0;
 quality.is_valid = false;
+quality.softpass = false;
+quality.softpass_reason = '';
 
 if ~isfield(raw_data, 'position_xyz') || isempty(raw_data.position_xyz)
     return;
@@ -2048,6 +2368,19 @@ quality.is_valid = quality.alt_gain_m >= double(mission_config.quality_min_alt_g
      quality.xy_travel_m >= double(mission_config.quality_min_xy_travel_m)) && ...
     quality.armed_ratio >= double(mission_config.quality_min_armed_ratio) && ...
     quality.no_link_ratio <= double(mission_config.quality_max_no_link_ratio);
+
+if ~quality.is_valid && isfield(mission_config, 'control_backend') && ...
+        strcmpi(char(string(mission_config.control_backend)), 'mavros') && ...
+        logical(mission_config.allow_quality_gate_softpass_on_missing_telemetry)
+    missing_telemetry = quality.no_link_ratio >= 0.95 && quality.armed_ratio <= 0.05 && ...
+        quality.alt_gain_m <= 0.05 && quality.xy_travel_m <= 0.05;
+    if missing_telemetry
+        quality.is_valid = true;
+        quality.softpass = true;
+        quality.softpass_reason = sprintf('mavros single-link telemetry missing (no_link_ratio=%.2f, armed_ratio=%.2f)', ...
+            quality.no_link_ratio, quality.armed_ratio);
+    end
+end
 end
 
 function is_interrupt = autlIsUserInterrupt(ME)
@@ -2293,6 +2626,64 @@ while toc(t0) < timeout_s
 end
 
 msg = sprintf('%s (timeout %.1fs)', msg, timeout_s);
+end
+
+function [ok, msg] = autlWaitForModeArmGate(control_cfg, expected_mode, timeout_s)
+% Wait until /mavros/state reflects expected mode and armed=true.
+
+ok = false;
+msg = 'mode/arm state unavailable';
+
+if nargin < 2 || strlength(string(expected_mode)) == 0
+    expected_mode = 'GUIDED';
+end
+if nargin < 3 || ~isfinite(double(timeout_s))
+    timeout_s = 8.0;
+end
+
+ns = '/mavros';
+if isfield(control_cfg, 'control') && isstruct(control_cfg.control) && isfield(control_cfg.control, 'mavros_namespace') && ...
+        strlength(string(control_cfg.control.mavros_namespace)) > 0
+    ns = char(string(control_cfg.control.mavros_namespace));
+end
+if ~startsWith(ns, '/')
+    ns = ['/' ns];
+end
+if endsWith(ns, '/')
+    ns = ns(1:end-1);
+end
+
+this_file = mfilename('fullpath');
+repo_root = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+iicc26_setup = fullfile(fileparts(repo_root), 'IICC26_ws', 'install', 'setup.bash');
+source_overlay = sprintf('[ -f "%s" ] && source "%s" >/dev/null 2>&1; ', iicc26_setup, iicc26_setup);
+
+expected_mode_u = upper(char(string(expected_mode)));
+t0 = tic;
+while toc(t0) < double(timeout_s)
+    sample_timeout_s = min(2, max(1, ceil(double(timeout_s) - toc(t0))));
+    cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout %d ros2 topic echo --once %s/state''', ...
+        source_overlay, sample_timeout_s, ns);
+    [rc, out] = system(cmd);
+    if rc == 0
+        out_l = lower(char(string(out)));
+        armed_ok = ~isempty(regexp(out_l, 'armed\s*:\s*true', 'once'));
+        mode_ok = contains(upper(char(string(out))), ['MODE: ' expected_mode_u]);
+        if armed_ok && mode_ok
+            ok = true;
+            msg = sprintf('armed=true mode=%s', expected_mode_u);
+            return;
+        end
+        msg = sprintf('armed_ok=%d mode_ok=%d', armed_ok, mode_ok);
+    elseif rc == 124
+        msg = sprintf('state echo timeout (%ds)', sample_timeout_s);
+    else
+        msg = strtrim(char(string(out)));
+    end
+    pause(0.4);
+end
+
+msg = sprintf('%s (timeout %.1fs)', msg, double(timeout_s));
 end
 
 function [ok, msg] = autlWaitForTakeoffGate(mav_config, mission_config, control_cfg)

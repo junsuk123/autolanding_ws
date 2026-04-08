@@ -51,7 +51,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /autolanding/drone1/aruco_markers
+        Value: /autolanding/drone1/aruco_marker_array
       Value: true
     - Alpha: 1
       Class: rviz_default_plugins/PoseArray

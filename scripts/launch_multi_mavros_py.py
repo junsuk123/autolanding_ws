@@ -66,7 +66,7 @@ def launch_mavros_instance(instance_id, ns_prefix, verbose=False):
         "apm.launch",
         f"namespace:={namespace}",
         f"fcu_url:=tcp://127.0.0.1:{serial0_port}",
-        f"tgt_system:=1",
+        f"tgt_system:={instance_id}",
         f"tgt_component:=1",
         f"fcu_protocol:=v2.0",
         f"respawn_mavros:=false",
@@ -81,6 +81,7 @@ def launch_mavros_instance(instance_id, ns_prefix, verbose=False):
     print(f"[INFO] MAVROS W{instance_id} launcher command:")
     print(f"        namespace={namespace}")
     print(f"        FCU endpoint=tcp:127.0.0.1:{serial0_port}")
+    print(f"        tgt_system={instance_id}")
     print(f"        fallback=tcp:127.0.0.1:{serial1_port}")
 
     if not wait_for_tcp_listener("127.0.0.1", serial0_port, timeout_s=35.0, poll_s=0.5):

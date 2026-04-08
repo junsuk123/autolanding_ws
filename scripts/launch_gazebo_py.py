@@ -16,6 +16,31 @@ import sys
 from pathlib import Path
 
 
+def detect_display() -> str:
+    forced_display = os.environ.get("AUTOLANDING_DISPLAY", "").strip()
+    if forced_display:
+        return forced_display
+
+    try:
+        result = subprocess.run(
+            ["bash", "-lc", "who 2>/dev/null | sed -n 's/.*(\\(:[0-9][0-9]*\\)).*/\\1/p' | head -n1"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        active_disp = (result.stdout or "").strip()
+        if active_disp:
+            return active_disp
+    except Exception:
+        pass
+
+    x11_socks = sorted(Path("/tmp/.X11-unix").glob("X*"))
+    if x11_socks:
+        return f":{x11_socks[0].name[1:]}"
+    return ":0"
+
+
 def get_gazebo_env():
     """Prepare Gazebo environment variables with clean library paths."""
     env = os.environ.copy()
@@ -111,8 +136,13 @@ def launch_gazebo(world_file, gui=True, verbose=False):
 
     # Set DISPLAY if GUI requested
     if gui:
-        display = os.environ.get("DISPLAY", ":0")
+        display = os.environ.get("DISPLAY", "")
+        if not display:
+            display = detect_display()
         env["DISPLAY"] = display
+        if os.environ.get("AUTOLANDING_GUI_SOFTWARE", "1") == "1":
+            env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+            env["MESA_LOADER_DRIVER_OVERRIDE"] = os.environ.get("MESA_LOADER_DRIVER_OVERRIDE", "llvmpipe")
         # Find valid XAUTHORITY file
         xauth_candidates = [
             os.environ.get("XAUTHORITY", ""),
@@ -126,6 +156,10 @@ def launch_gazebo(world_file, gui=True, verbose=False):
 
     print(f"[INFO] Launching Gazebo {'(GUI)' if gui else '(Server)'}")
     print(f"[INFO] World: {world_file}")
+    if gui:
+        print(f"[INFO] DISPLAY: {env.get('DISPLAY', '<unset>')}")
+        print(f"[INFO] XAUTHORITY: {env.get('XAUTHORITY', '<unset>')}")
+        print(f"[INFO] GUI software render: {env.get('LIBGL_ALWAYS_SOFTWARE', '0')}")
     print(f"[INFO] GZ_SIM_RESOURCE_PATH: {env['GZ_SIM_RESOURCE_PATH']}")
 
     try:

@@ -39,6 +39,7 @@ def load_topic_settings() -> dict[str, str]:
         "camera_image_topic": f"{DEFAULT_DRONE_NS_PREFIX}{DEFAULT_PRIMARY_DRONE_INDEX}/camera",
         "camera_info_topic": f"{DEFAULT_DRONE_NS_PREFIX}{DEFAULT_PRIMARY_DRONE_INDEX}/camera_info",
         "aruco_markers_topic": f"{DEFAULT_DRONE_NS_PREFIX}{DEFAULT_PRIMARY_DRONE_INDEX}/aruco_markers",
+        "aruco_markerarray_topic": f"{DEFAULT_DRONE_NS_PREFIX}{DEFAULT_PRIMARY_DRONE_INDEX}/aruco_marker_array",
         "aruco_poses_topic": f"{DEFAULT_DRONE_NS_PREFIX}{DEFAULT_PRIMARY_DRONE_INDEX}/aruco_poses",
     }
     cfg_path = ROOT / "ai" / "configs" / "orchestration_config.yaml"
@@ -66,6 +67,7 @@ def load_topic_settings() -> dict[str, str]:
         out["camera_image_topic"] = resolve_topic("camera_image_topic", "camera")
         out["camera_info_topic"] = resolve_topic("camera_info_topic", "camera_info")
         out["aruco_markers_topic"] = resolve_topic("aruco_markers_topic", "aruco_markers")
+        out["aruco_markerarray_topic"] = resolve_topic("aruco_markerarray_topic", "aruco_marker_array")
         out["aruco_poses_topic"] = resolve_topic("aruco_poses_topic", "aruco_poses")
         return out
     except Exception:
@@ -115,6 +117,7 @@ def launch_ros2_aruco() -> str:
     image_topic = topics["camera_image_topic"]
     info_topic = topics["camera_info_topic"]
     markers_topic = topics["aruco_markers_topic"]
+    markerarray_topic = topics["aruco_markerarray_topic"]
     poses_topic = topics["aruco_poses_topic"]
 
     env_clean = "unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; "
@@ -131,6 +134,7 @@ def launch_ros2_aruco() -> str:
             -p image_topic:={image_topic} \
             -p camera_info_topic:={info_topic} \
             -r /aruco_markers:={markers_topic} \
+                        -r /aruco_marker_array:={markerarray_topic} \
             -r /aruco_poses:={poses_topic} \
       > /tmp/autolanding_ros2_aruco.log 2>&1
     '
@@ -163,6 +167,7 @@ def launch_rviz() -> str:
     export ROS_DOMAIN_ID=${{ROS_DOMAIN_ID:-0}}
     export DISPLAY=${{DISPLAY:-:0}}
     export QT_QPA_PLATFORM=xcb
+    export NO_AT_BRIDGE=1
     rviz2 {config_arg} > /tmp/autolanding_rviz.log 2>&1
     '
     """

@@ -1,0 +1,85 @@
+{
+  "data_summary": {
+    "num_train": 10,
+    "num_val": 2,
+    "num_features": 14,
+    "train_pos_rate": 0,
+    "val_pos_rate": 0,
+    "X_mean": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "X_std": [
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6,
+      1E-6
+    ]
+  },
+  "comparison": {
+    "models": [
+      "Ontology+AI (Hybrid)",
+      "Pure AI (Baseline)"
+    ],
+    "metrics": [
+      {
+        "accuracy": 1,
+        "precision": 0,
+        "recall": 0,
+        "f1": 0,
+        "TP": 0,
+        "FP": 0,
+        "FN": 0,
+        "TN": 2
+      },
+      {
+        "accuracy": 1,
+        "precision": 0,
+        "recall": 0,
+        "f1": 0,
+        "TP": 0,
+        "FP": 0,
+        "FN": 0,
+        "TN": 2
+      }
+    ],
+    "summary_text": "\n============================================================\nMODEL COMPARISON RESULTS\n============================================================\n\nOntology+AI (Hybrid):\n  Accuracy:  1.0000\n  Precision: 0.0000\n  Recall:    0.0000\n  F1-Score:  0.0000\n  TP: 0, FP: 0, FN: 0, TN: 2\n\nPure AI (Baseline):\n  Accuracy:  1.0000\n  Precision: 0.0000\n  Recall:    0.0000\n  F1-Score:  0.0000\n  TP: 0, FP: 0, FN: 0, TN: 2\n\n------------------------------------------------------------\nRESULT: Tie (both 1.0000 accuracy)\n============================================================\n"
+  },
+  "model_run_dir": "/home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/models/20260408_132616_scenarios_012",
+  "validation_split": {
+    "train_scenarios": 10,
+    "val_scenarios": 2
+  },
+  "model_paths": {
+    "hybrid": "/home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/models/model_hybrid_ontology_ai.mat",
+    "pure": "/home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/models/model_pure_ai.mat"
+  },
+  "model_metadata": {
+    "hybrid_type": "hybrid_ontology_ai",
+    "pure_type": "pure_ai",
+    "hybrid_acc_val": 1,
+    "pure_acc_val": 1
+  }
+}

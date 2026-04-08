@@ -76,6 +76,102 @@ J_land = sum_t (w_xy ||p_xy,t - p_m,xy||^2 + w_z (z_t - z_m)^2 + w_v ||v_t||^2)
 
 필요 시 위 개별 토픽 키만 별도로 override할 수 있습니다.
 
+### Multi-UAV Scalable Protocol (N <= 10)
+
+This repository now includes a fully isolated `/uavX` architecture for Gazebo + SITL + MAVROS + MATLAB.
+
+Isolation rules per UAV index `X`:
+
+- Namespace: `/uavX/mavros/*`
+- SYSID: `SYSID_THISMAV = X`
+- SITL MAVLink UDP out: `14539 + X` (UAV1 -> 14540, UAV2 -> 14541, ...)
+- MAVROS bind UDP: `14639 + X`
+- MAVROS FCU URL: `udp://127.0.0.1:(14539+X)@(14639+X)`
+
+Communication bandwidth planning (recommended):
+
+- State stream rate: 10 Hz
+- Control stream rate: 20 Hz
+- Approximate aggregate message rate for `N` UAVs:
+	`R_total ~= N * (R_state + R_control)`
+
+Launch artifacts:
+
+- `scripts/start_multi_uav_sitl.py`
+- `scripts/start_multi_uav_mavros.py`
+- `simulation/launch/multi_uav_mavros.launch.py`
+- `scripts/start_multi_uav_stack.sh`
+- MATLAB demo: `matlab/scripts/run_multi_uav_mavros_demo.m`
+- Detailed design: `docs/MULTI_UAV_SYSTEM_DESIGN.md`
+
+Quick start (3 UAVs):
+
+```bash
+cd autolanding_ws
+bash scripts/start_multi_uav_stack.sh 3
+```
+
+Quick checks:
+
+```bash
+ros2 topic list | grep '^/uav[1-3]/mavros/state$'
+ros2 service list | grep '/uav[1-3]/mavros/cmd/arming'
+```
+
+MATLAB multi-UAV control example:
+
+```matlab
+addpath(genpath('matlab'));
+run_multi_uav_mavros_demo(3);
+```
+
+### 2.1 Simulation Recovery: Gazebo Soft Reset
+
+**Drone Hover Instability Auto-Recovery:**
+
+When drone hover is unstable during data collection, the system automatically performs a Gazebo soft reset:
+
+```matlab
+% Automatic in autlRunDataCollection:
+% - Detects hover stabilization timeout (20s)
+% - Calls Gazebo WorldControl reset service
+% - Logs reset status
+% - Waits 1.5s for physics stabilization
+```
+
+**Manual Gazebo soft reset from MATLAB:**
+
+```matlab
+% One-time reset
+[ok, msg] = autlResetGazeboSimulation('default', '[MyScript] ');
+fprintf('Reset: %s\n', msg);
+
+% With world name
+[ok, msg] = autlResetGazeboSimulation('myworld', '[Prefix] ');
+```
+
+**Manual reset via command line:**
+
+```bash
+# WorldControl method (Gazebo v8+)
+gz service -s /world/default/control --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean --timeout 3000 --req 'reset: {all: true}'
+
+# Or via ROS2
+ros2 service call /world/default/control gz_msgs/srv/WorldControl '{reset: {all: true}}'
+
+# Alternative reset services
+ros2 service call /gazebo/reset_simulation std_srvs/srv/Empty '{}'
+ros2 service call /reset_world std_srvs/srv/Empty '{}'
+```
+
+**Gazebo GUI troubleshooting:**
+
+- Force GUI mode: `AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 bash simulation/launch/start_gz_ardupilot.sh`
+- Force a specific display (if :0 is not your desktop): `AUTOLANDING_DISPLAY=:1 AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 bash simulation/launch/start_gz_ardupilot.sh`
+- If OpenGL init fails (`libEGL ... dri2`), force software rendering: `AUTOLANDING_GUI_SOFTWARE=1 AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 bash simulation/launch/start_gz_ardupilot.sh`
+- If DISPLAY is empty: `export DISPLAY=:0`
+- If Xauthority is missing: `export XAUTHORITY=/run/user/$(id -u)/gdm/Xauthority` (or `~/.Xauthority`)
+
 ## 2. MATLAB Orchestrator
 
 Main entrypoint:

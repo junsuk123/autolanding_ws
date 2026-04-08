@@ -42,6 +42,7 @@ drone_namespace: /autolanding/drone1
 camera_image_topic: /autolanding/drone1/camera
 camera_info_topic: /autolanding/drone1/camera_info
 aruco_markers_topic: /autolanding/drone1/aruco_markers
+aruco_markerarray_topic: /autolanding/drone1/aruco_marker_array
 aruco_poses_topic: /autolanding/drone1/aruco_poses
 
 # MAVROS 네임스페이스 접두사

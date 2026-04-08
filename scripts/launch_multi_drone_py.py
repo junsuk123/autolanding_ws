@@ -11,6 +11,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -61,6 +62,9 @@ def start_instance(instance_id, ardupilot_dir, speedup, log_dir):
 
     # FDM ports: 9002+10*i for input, 9003+10*i for output
     # SERIAL0: 5760+10*i, SERIAL1: 5762+10*i
+    sysid = instance_id + 1
+    sysid_param = Path(tempfile.gettempdir()) / f"autolanding_sysid_I{instance_id}.parm"
+    sysid_param.write_text(f"SYSID_THISMAV {sysid}\n", encoding="utf-8")
     cmd = [
         bin_path,
         "--model",
@@ -71,7 +75,8 @@ def start_instance(instance_id, ardupilot_dir, speedup, log_dir):
         "0",
         "--defaults",
         f"{ardupilot_dir}/Tools/autotest/default_params/copter.parm,"
-        f"{ardupilot_dir}/Tools/autotest/default_params/gazebo-iris.parm",
+        f"{ardupilot_dir}/Tools/autotest/default_params/gazebo-iris.parm,"
+        f"{sysid_param}",
         f"-I{instance_id}",
     ]
 
@@ -100,6 +105,7 @@ def start_instance(instance_id, ardupilot_dir, speedup, log_dir):
         f"\n        sim_addr={sim_addr}"
         f"\n        master=tcp:127.0.0.1:{serial0_port}"
         f"\n        serial1=tcp:127.0.0.1:{serial1_port}"
+        f"\n        SYSID_THISMAV={sysid}"
         f"\n        FDM in:out={fdm_in_port}:{fdm_out_port}"
         f"\n        log={log_file}"
     )

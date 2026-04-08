@@ -142,11 +142,10 @@ if nargin >= 3 && ~isempty(varargin)
 end
 
 if any(strcmp(runtime.mode, {'gui', 'server', 'headless'}))
+    requested_mode = runtime.mode;
     runtime.mode = 'sim';
-    if ~isempty(varargin)
-        runtime.gazebo_server_mode = any(strcmp(lower(string(varargin{1})), {'server', 'headless'}));
-    else
-        runtime.gazebo_server_mode = false;
+    if ~isfield(runtime, 'gazebo_server_mode')
+        runtime.gazebo_server_mode = any(strcmp(requested_mode, {'server', 'headless'}));
     end
 else
     if ~isfield(runtime, 'gazebo_server_mode')
