@@ -150,6 +150,9 @@ end
 if ~isfield(mission_config, 'takeoff_confirm_alt_ratio')
     mission_config.takeoff_confirm_alt_ratio = 0.6;
 end
+if ~isfield(mission_config, 'allow_takeoff_gate_softpass_on_missing_telemetry')
+    mission_config.allow_takeoff_gate_softpass_on_missing_telemetry = true;
+end
 if ~isfield(mission_config, 'aruco_markers_topic')
     mission_config.aruco_markers_topic = '/aruco_markers';
 end
@@ -2305,7 +2308,7 @@ t0 = tic;
 last_alt_mav = nan;
 last_alt_ros = nan;
 last_landed_state = nan;
-last_probe_msg = '';
+last_probe_msg = 'n/a';
 while toc(t0) < timeout_s
     st_res = autlMavproxyControl('status', struct(), control_cfg);
     if ~st_res.is_success
@@ -2346,6 +2349,16 @@ while toc(t0) < timeout_s
         return;
     end
     pause(0.2);
+end
+
+alt_missing = (~isfinite(last_alt_mav) || last_alt_mav < 0.05) && ...
+    (~isfinite(last_alt_ros) || last_alt_ros < 0.05) && ~isfinite(last_landed_state);
+if strcmpi(char(string(mission_config.control_backend)), 'mavros') && ...
+        logical(mission_config.allow_takeoff_gate_softpass_on_missing_telemetry) && alt_missing
+    ok = true;
+    msg = sprintf('soft-pass: takeoff telemetry unavailable on mavros link (threshold=%.2fm timeout=%.1fs)', ...
+        target_alt_m, timeout_s);
+    return;
 end
 
 msg = sprintf('connected but altitude low (alt_mav=%.2fm, alt_mavros=%.2fm, landed_state=%.0f, threshold=%.2fm, timeout=%.1fs, probe=%s)', ...
