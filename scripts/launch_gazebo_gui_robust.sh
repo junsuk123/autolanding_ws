@@ -7,6 +7,30 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$(dirname "$SCRIPT_DIR")"
 
+# Source cleanup utilities
+source "$SCRIPT_DIR/cleanup_utils.sh"
+
+# Signal handlers
+on_interrupt() {
+	echo ""
+	echo "[Launch] Received SIGINT, cleaning up Gazebo..."
+	cleanup_all_processes
+	exit 130
+}
+
+cleanup_on_exit() {
+	local exit_code="$?"
+	if [[ $exit_code -ne 130 ]]; then
+		echo "[Launch] Script ended, ensuring Gazebo cleanup..."
+		cleanup_all_processes
+	fi
+	exit "$exit_code"
+}
+
+# Setup traps
+trap on_interrupt INT TERM
+trap cleanup_on_exit EXIT
+
 # Get proper display
 if [ -z "$DISPLAY" ]; then
     DISPLAY=:0

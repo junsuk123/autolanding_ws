@@ -14,6 +14,11 @@ if nargin < 2 || isempty(mission_config)
     mission_config = struct();
 end
 
+ros_domain_id_value = strtrim(getenv('ROS_DOMAIN_ID'));
+if isempty(ros_domain_id_value) || isempty(regexp(ros_domain_id_value, '^[0-9]+$', 'once'))
+    setenv('ROS_DOMAIN_ID', '0');
+end
+
 % Default collection config
 if ~isfield(mission_config, 'max_duration')
     mission_config.max_duration = 120;  % seconds
@@ -1667,7 +1672,7 @@ else
 end
 end
 
-function [ok, msg] = autlEnsureGazeboSITLStackGlobalTop()
+function [ok, msg] = autlEnsureGazeboSITLStackGlobalTop(varargin)
 ok = false;
 msg = "not_run";
 try
@@ -1682,8 +1687,8 @@ try
     log_path = fullfile(root_dir, 'data', 'logs', 'mavlink_stack_recovery.log');
 
     force_headless = true;
-    if nargin >= 1 && isstruct(mission_config) && isfield(mission_config, 'gazebo_server_mode')
-        force_headless = logical(mission_config.gazebo_server_mode);
+    if nargin >= 1 && isstruct(varargin{1}) && isfield(varargin{1}, 'gazebo_server_mode')
+        force_headless = logical(varargin{1}.gazebo_server_mode);
     end
     if strcmp(getenv('AUTOLANDING_FORCE_GUI'), '1')
         force_headless = false;

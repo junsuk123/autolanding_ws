@@ -8,6 +8,29 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Source cleanup utilities
+source "$SCRIPT_DIR/cleanup_utils.sh"
+
+# Signal handlers
+on_interrupt() {
+	echo ""
+	echo "[interrupt] Received SIGINT, cleaning up..."
+	cleanup_all_processes
+	exit 130
+}
+
+cleanup_on_exit() {
+	local exit_code="$?"
+	if [[ $exit_code -ne 130 ]]; then
+		cleanup_all_processes
+	fi
+	exit "$exit_code"
+}
+
+# Setup traps
+trap on_interrupt INT TERM
+trap cleanup_on_exit EXIT
+
 echo "========================================"
 echo "   AUTOLANDING MISSION LAUNCHER"
 echo "========================================"

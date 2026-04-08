@@ -2,11 +2,21 @@ function summary = AutoLandingMain(varargin)
 % AUTOLANDINGMAIN
 % MATLAB entrypoint for standard workspace execution.
 
+  rootDir = fileparts(fileparts(mfilename('fullpath')));
+
   % Pass through non-struct invocations (e.g. AutoLandingMain('gui')).
   if nargin >= 1 && ~isstruct(varargin{1})
-    if (ischar(varargin{1}) || isstring(varargin{1})) && any(strcmpi(strtrim(char(string(varargin{1}))), {'stop', 'cleanup', 'kill'}))
-      summary = localStopSimulationStack();
-      return;
+    if (ischar(varargin{1}) || isstring(varargin{1}))
+      mode = lower(strtrim(char(string(varargin{1}))));
+      if any(strcmp(mode, {'stop', 'cleanup', 'kill'}))
+        summary = localStopSimulationStack(rootDir);
+        return;
+      end
+      if any(strcmp(mode, {'gui', 'headless', 'server'}))
+        localCleanupSimulationStack(rootDir);
+        summary = localStartSimulationStack(any(strcmp(mode, {'headless', 'server'})));
+        return;
+      end
     end
     summary = AutoLandingMainFull(varargin{:});
     return;
@@ -14,9 +24,9 @@ function summary = AutoLandingMain(varargin)
 
   defaults = struct( ...
       'mode', 'full', ...
-      'num_drones', 2, ...
-      'num_landing_pads', 2, ...
-      'scenarios_per_worker', 200, ...
+      'num_drones', 1, ...
+      'num_landing_pads', 1, ...
+      'scenarios_per_worker', 20, ...
       'train_ratio', 0.8, ...
       'val_ratio', 0.2, ...
       'headless', false, ...
@@ -37,23 +47,57 @@ function summary = AutoLandingMain(varargin)
     end
   end
 
+  cleanup_guard = onCleanup(@() localCleanupSimulationStack(rootDir)); %#ok<NASGU>
   summary = AutoLandingMainFull(defaults);
 end
 
-function summary = localStopSimulationStack()
+function summary = localStopSimulationStack(rootDir)
 % Stop Gazebo/SITL/MAVROS stack launched by AutoLandingMain/AutoLandingMainFull.
 
-  cmd = [ ...
-      'bash -lc ''set +e; ' ...
-      'pkill -TERM -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
-      'fuser -k 5760/tcp >/dev/null 2>&1 || true; ' ...
-      'fuser -k 5762/tcp >/dev/null 2>&1 || true; ' ...
-      'fuser -k 14550/udp >/dev/null 2>&1 || true; ' ...
-      'sleep 1; ' ...
-      'pkill -KILL -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
-      'exit 0'''];
-
-  [status, out] = system(cmd); %#ok<ASGLU>
-  summary = struct('ok', status == 0, 'message', 'Simulation stack stop command executed.');
+  localCleanupSimulationStack(rootDir);
+  summary = struct('ok', true, 'message', 'Simulation stack stop command executed.');
   fprintf('[AutoLandingMain] %s\n', summary.message);
+end
+
+function summary = localStartSimulationStack(force_headless)
+% Start only Gazebo/SITL/MAVROS stack without running mission/pipeline.
+
+  rootDir = fileparts(fileparts(mfilename('fullpath')));
+  launcher = fullfile(rootDir, 'scripts', 'verify_gz_ardupilot_stack.sh');
+  if ~isfile(launcher)
+    error('[AutoLandingMain] Missing simulator launcher: %s', launcher);
+  end
+
+  spawn_env = 'AUTOLANDING_INITIAL_SPAWN_X_M=1.0 AUTOLANDING_INITIAL_SPAWN_Y_M=0.35 AUTOLANDING_INITIAL_SPAWN_Z_M=0.15';
+  if force_headless
+    cmd = sprintf('%s AUTOLANDING_FORCE_HEADLESS=1 bash "%s"', spawn_env, launcher);
+  else
+    cmd = sprintf('%s AUTOLANDING_FORCE_GUI=1 AUTOLANDING_FORCE_HEADLESS=0 bash "%s"', spawn_env, launcher);
+  end
+
+  [status, output] = system(cmd);
+  summary = struct('ok', status == 0, 'message', strtrim(output));
+  if summary.ok
+    fprintf('[AutoLandingMain] Simulation stack started (%s).\n', ternary(force_headless, 'headless', 'gui'));
+  else
+    error('[AutoLandingMain] Failed to start simulation stack (exit=%d): %s', status, strtrim(output));
+  end
+end
+
+function localCleanupSimulationStack(rootDir)
+cleanup_script = fullfile(rootDir, 'scripts', 'cleanup_utils.sh');
+if ~isfile(cleanup_script)
+  return;
+end
+
+cmd = sprintf('bash -lc ''set +e; source "%s" >/dev/null 2>&1; cleanup_all_processes >/dev/null 2>&1; exit 0''', cleanup_script);
+system(cmd);
+end
+
+function out = ternary(cond, a, b)
+if cond
+  out = a;
+else
+  out = b;
+end
 end

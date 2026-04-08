@@ -34,9 +34,15 @@ if exist(coreDir, 'dir')
     addpath(genpath(coreDir));
 end
 
+ros_domain_id_value = strtrim(getenv('ROS_DOMAIN_ID'));
+if isempty(ros_domain_id_value) || isempty(regexp(ros_domain_id_value, '^[0-9]+$', 'once'))
+    setenv('ROS_DOMAIN_ID', '0');
+end
 run_params = localResolveRunParams(varargin{:});
 mode = localResolveMode(run_params);
 if localNeedsSimulation(mode)
+    cleanup_guard = onCleanup(@() localCleanupSimulationStack(rootDir)); %#ok<NASGU>
+    localCleanupSimulationStack(rootDir);
     localEnsureSimulationStack(rootDir, run_params);
 end
 
@@ -263,14 +269,15 @@ end
 function localPreKillSimulationProcesses()
 % Extra safety: terminate stale stack processes before launcher cleanup runs.
 
-cleanup_cmd = [ ...
-    'bash -lc ''set +e; ' ...
-    'pkill -TERM -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
-    'fuser -k 5760/tcp >/dev/null 2>&1 || true; ' ...
-    'fuser -k 5762/tcp >/dev/null 2>&1 || true; ' ...
-    'fuser -k 14550/udp >/dev/null 2>&1 || true; ' ...
-    'sleep 1; ' ...
-    'pkill -KILL -f "gz sim|gzserver|gzclient|ign gazebo|rviz2|rviz|mavros_node|arducopter|sim_vehicle.py|mavproxy.py" >/dev/null 2>&1 || true; ' ...
-    'exit 0'''];
-system(cleanup_cmd);
+localCleanupSimulationStack(fileparts(fileparts(mfilename('fullpath'))));
+end
+
+function localCleanupSimulationStack(rootDir)
+cleanup_script = fullfile(rootDir, 'scripts', 'cleanup_utils.sh');
+if ~isfile(cleanup_script)
+    return;
+end
+
+cmd = sprintf('bash -lc ''set +e; source "%s" >/dev/null 2>&1; cleanup_all_processes >/dev/null 2>&1; exit 0''', cleanup_script);
+system(cmd);
 end

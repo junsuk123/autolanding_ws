@@ -3,6 +3,30 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RVIZ_CFG="$ROOT_DIR/simulation/configs/autolanding_monitor.rviz"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Source cleanup utilities
+source "$SCRIPT_DIR/cleanup_utils.sh"
+
+# Signal handlers
+on_interrupt() {
+	echo ""
+	echo "[rviz] Received SIGINT, cleaning up..."
+	cleanup_all_processes
+	exit 130
+}
+
+cleanup_on_exit() {
+	local exit_code="$?"
+	if [[ $exit_code -ne 130 ]]; then
+		cleanup_all_processes
+	fi
+	exit "$exit_code"
+}
+
+# Setup traps
+trap on_interrupt INT TERM
+trap cleanup_on_exit EXIT
 
 # Remove VS Code snap / desktop injected vars that can break rviz2 dynamic linking.
 unset LD_LIBRARY_PATH LD_PRELOAD QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE
@@ -38,7 +62,7 @@ export DISPLAY="${DISPLAY:-:0}"
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 
 if [[ -f "$RVIZ_CFG" ]]; then
-  exec rviz2 -d "$RVIZ_CFG"
+  rviz2 -d "$RVIZ_CFG"
 else
-  exec rviz2
+  rviz2
 fi

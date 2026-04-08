@@ -6,6 +6,10 @@ if nargin < 1 || strlength(string(rootDir)) == 0
     rootDir = fileparts(fileparts(fileparts(fileparts(mfilename('fullpath')))));
 end
 
+ros_domain_id_value = strtrim(getenv('ROS_DOMAIN_ID'));
+if isempty(ros_domain_id_value) || isempty(regexp(ros_domain_id_value, '^[0-9]+$', 'once'))
+    setenv('ROS_DOMAIN_ID', '0');
+end
 localAddWorkspacePaths(rootDir);
 
 cfg = autlLoadOrchestrationConfig(fullfile(rootDir, 'ai', 'configs', 'orchestration_config.yaml'));

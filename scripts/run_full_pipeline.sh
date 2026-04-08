@@ -10,6 +10,9 @@ if [[ -d "$ROOT_DIR/.venv/bin" ]]; then
 	export PATH="$ROOT_DIR/.venv/bin:$PATH"
 fi
 
+# Source cleanup utilities
+source "$(dirname "$0")/cleanup_utils.sh"
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--keep-sim)
@@ -31,42 +34,29 @@ done
 # Gazebo process management
 GZ_PID=""
 
-# Function to kill Gazebo on exit
-cleanup_gazebo() {
-	echo "[cleanup] Terminating Gazebo processes..."
-	pkill -TERM -f "gz sim" 2>/dev/null || true
-	pkill -TERM -f "parameter_bridge" 2>/dev/null || true
-	pkill -TERM -f "aruco_node" 2>/dev/null || true
-	pkill -TERM -f "publish_multi_drone_odom.py" 2>/dev/null || true
-	pkill -TERM -f "rviz2" 2>/dev/null || true
-	sleep 2
-	
-	# Force kill remaining processes if necessary
-	if pgrep -f "gz sim" >/dev/null 2>&1; then
-		echo "[cleanup] Force killing remaining Gazebo processes..."
-		pkill -9 -f "gz sim" 2>/dev/null || true
-	fi
-	pkill -9 -f "parameter_bridge" 2>/dev/null || true
-	pkill -9 -f "aruco_node" 2>/dev/null || true
-	pkill -9 -f "publish_multi_drone_odom.py" 2>/dev/null || true
-	pkill -9 -f "rviz2" 2>/dev/null || true
-	
-	echo "[cleanup] Gazebo cleanup complete"
-}
-
 on_interrupt() {
-	cleanup_gazebo
+	echo "[interrupt] Received SIGINT, cleaning up..."
+	cleanup_all_processes
 	exit 130
 }
 
 cleanup_on_failure() {
 	local exit_code="$1"
-	cleanup_gazebo
+	cleanup_all_processes
 	exit "$exit_code"
 }
 
-# Cleanup only on interrupt/signals or launcher failure.
+cleanup_on_exit() {
+	local exit_code="$?"
+	if [[ $exit_code -ne 130 ]]; then
+		cleanup_all_processes
+	fi
+	exit "$exit_code"
+}
+
+# Cleanup on interrupt/signals or launcher failure.
 trap on_interrupt INT TERM
+trap cleanup_on_exit EXIT
 
 echo "[pipeline] Starting full pipeline with Gazebo..."
 echo "[pipeline] Root directory: $ROOT_DIR"
