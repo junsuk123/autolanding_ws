@@ -76,16 +76,12 @@ else
     echo "[WARNING] Simulation will proceed but vehicle control may fail"
 fi
 
-# Run Python simulation launcher
+# Run MATLAB simulation launcher
 echo ""
-echo "[LAUNCH] Starting Python full simulation..."
+echo "[LAUNCH] Starting MATLAB full simulation..."
 cd "$WS_ROOT"
 
-python3 "$WS_ROOT/scripts/autolanding_launcher.py" sim \
-    --workspace-root "$WS_ROOT" \
-    --semantic-input "$WS_ROOT/data/samples/semantic_input_example.json" \
-    --config "$WS_ROOT/ai/configs/policy_config.yaml" \
-    --gui
+matlab -batch "run('matlab/run_autolanding_sim.m')"
 
 echo ""
 echo "========================================"

@@ -1,5 +1,5 @@
-# AutoLanding Python 오케스트레이션 설정 파일
-# 이 파일만 수정하면 전체 실행 파라미터를 바꿀 수 있습니다.
+# AutoLanding MATLAB orchestration configuration
+# Edit this file to change the full execution parameters.
 
 # 실행 모드
 # - full: Gazebo + SITL + RViz 런처 실행 후 파이프라인/검증/플롯까지 수행
@@ -13,6 +13,23 @@ semantic_input: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/samp
 config: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/ai/configs/policy_config.yaml
 plots_dir: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/plots/paper
 world: /tmp/iris_runway_aruco_landing.sdf
+collection_root: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/collected
+model_root: /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/data/models
+
+# Landing pad / spawn alignment
+# aruco_box model.sdf base collision size is 0.5m.
+# Effective values below reflect scaled model in verify world generation.
+landing_pad_center_x: 0.0
+landing_pad_center_y: 0.0
+landing_pad_center_z: 0.25
+aruco_box_height_m: 0.5
+landing_pad_size_xy: 2.4
+# Drone spawn is clamped to be at least (marker_top_z + drone_spawn_above_pad_m)
+drone_spawn_above_pad_m: 0.35
+# World generation parameters for the physical pad geometry.
+aruco_box_scale_xy: 2.4
+aruco_box_scale_z: 1.0
+initial_spawn_z_m: 0.9
 
 # 드론 네임스페이스 통합 설정
 # - 기본 규칙: drone_ns_prefix + primary_drone_index
@@ -29,6 +46,11 @@ aruco_poses_topic: /autolanding/drone1/aruco_poses
 
 # MAVROS 네임스페이스 접두사
 mavros_ns_prefix: /autolanding/mavros_w
+mavros_namespace: /mavros
+
+# MATLAB control backend policy (single-path by default for comm stability)
+control_backend: mavros
+control_backend_fallback: false
 
 # 시뮬레이션 표시 옵션
 # gui=true 면 GUI 모드, headless=true 면 서버 모드
@@ -39,12 +61,23 @@ headless: false
 # 로그/산출물 옵션
 verbose: true
 no_plots: false
+train_ratio: 0.8
+val_ratio: 0.2
+validation_hybrid_model_path: ''
+validation_pure_model_path: ''
 
 # 비행 데모 옵션 (실제 arm/takeoff/고도 상승 검증)
+# note: true면 MAVLink heartbeat 필수; false면 설정된 spawn position에서만 센서 수집
 auto_flight_demo: true
-demo_takeoff_alt_m: 3.0
+demo_takeoff_alt_m: 1.2
+# Takeoff 확인 게이트 활성화
+require_takeoff_confirmation_before_collection: true
 # 0이면 workers 개수 기준 SERIAL0 포트(5760, 5770, ...)를 자동 순회합니다.
 demo_master_port: 0
+
+# MAVLink 연결 옵션
+# ArduPilot SITL 초기화 시간 허용
+mavlink_precheck_timeout_s: 90.0
 
 # 착륙 실행 옵션 (궤적 추종 후 LAND 명령)
 auto_landing_execute: true
@@ -79,3 +112,18 @@ workers: 1
 # worker당 기본 수집 시나리오 개수(필요 시 자유롭게 수정)
 scenarios_per_worker: 10
 duration: 120
+
+# ROS2 custom interface preflight check (IICC26_ws build validation)
+require_custom_ros_interface: true
+required_ros_interfaces:
+	- sjtu_drone_interfaces/srv/SetWind
+
+# MAVLink readiness/control timeouts (seconds)
+mavlink_precheck_timeout_s: 90.0
+mavlink_control_timeout_s: 20.0
+
+# Communication framework (Gazebo -> SITL -> MAVROS)
+# - MAVROS FCU transport: MAVLink over TCP 5760
+mavlink_master: tcp:127.0.0.1:5760
+mavlink_master_fallback: ''
+mavros_fcu_url: tcp://127.0.0.1:5760

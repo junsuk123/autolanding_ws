@@ -1,11 +1,217 @@
-function AutoLandingMainFull(varargin)
+function summary = AutoLandingMainFull(varargin)
 % AUTOLANDINGMAINFULL
-% MATLAB compatibility entrypoint.
-% All orchestration is handled by scripts/autolanding_launcher.py.
+% MATLAB entrypoint for the full AutoLanding workspace orchestration.
+%
+% Quick configuration examples:
+%   summary = AutoLandingMainFull();
+%   summary = AutoLandingMainFull(struct( ...
+%       'mode', 'full', ...
+%       'num_drones', 2, ...
+%       'num_landing_pads', 2, ...
+%       'scenarios_per_worker', 12, ...
+%       'train_ratio', 0.8, ...
+%       'val_ratio', 0.2, ...
+%       'headless', false, ...
+%       'auto_flight_demo', true, ...
+%       'drone_spawn_above_pad_m', 0.35, ...
+%       'landing_pad_size_xy', 2.4, ...
+%       'demo_takeoff_alt_m', 1.2, ...
+%       'control_backend', 'mavros'));
+%
+% Legacy positional call is still supported:
+%   summary = AutoLandingMainFull('full', 1, 10);
 
-if autlRunPythonLauncher(varargin{:})
+rootDir = fileparts(fileparts(mfilename('fullpath')));
+modDir = fullfile(rootDir, 'matlab', 'modules');
+if exist(modDir, 'dir')
+    addpath(modDir);
+end
+coreDir = fullfile(modDir, 'core');
+if exist(coreDir, 'dir')
+    addpath(genpath(coreDir));
+end
+
+run_params = localResolveRunParams(varargin{:});
+mode = localResolveMode(run_params);
+if localNeedsSimulation(mode)
+    localEnsureSimulationStack(rootDir, run_params);
+end
+
+if isfield(run_params, 'num_landing_pads') && isfinite(run_params.num_landing_pads) && run_params.num_landing_pads > 1
+    fprintf('[AutoLandingMainFull] Warning: num_landing_pads=%d requested, but current world generator supports one active landing pad model.\n', ...
+        round(run_params.num_landing_pads));
+end
+
+summary = autlRunWorkspacePipeline(rootDir, run_params);
+end
+
+function params = localResolveRunParams(varargin)
+params = localDefaultRunParams();
+
+if isempty(varargin)
     return;
 end
 
-error('[AutoLandingMainFull] Python launcher not found. Expected scripts/autolanding_launcher.py');
+if numel(varargin) == 1 && isstruct(varargin{1})
+    params = localMergeParams(params, varargin{1});
+    return;
+end
+
+% Backward compatibility: AutoLandingMainFull('full', workers, scenarios)
+if ~isempty(varargin) && (ischar(varargin{1}) || isstring(varargin{1}))
+    params.mode = lower(strtrim(char(string(varargin{1}))));
+    params = localMarkExplicit(params, 'mode');
+    if numel(varargin) >= 2
+        params.num_drones = double(varargin{2});
+        params = localMarkExplicit(params, 'num_drones');
+    end
+    if numel(varargin) >= 3
+        params.scenarios_per_worker = double(varargin{3});
+        params = localMarkExplicit(params, 'scenarios_per_worker');
+    end
+    return;
+end
+
+% Name-value style: AutoLandingMainFull('mode','full','num_drones',2,...)
+if mod(numel(varargin), 2) ~= 0
+    error('[AutoLandingMainFull] Name-value arguments must be provided in pairs.');
+end
+
+for k = 1:2:numel(varargin)
+    key = lower(strtrim(char(string(varargin{k}))));
+    val = varargin{k + 1};
+    switch key
+        case {'mode'}
+            params.mode = lower(strtrim(char(string(val))));
+            params = localMarkExplicit(params, 'mode');
+        case {'num_drones', 'workers'}
+            params.num_drones = double(val);
+            params = localMarkExplicit(params, 'num_drones');
+        case {'num_landing_pads', 'landing_pad_count'}
+            params.num_landing_pads = double(val);
+            params = localMarkExplicit(params, 'num_landing_pads');
+        case {'scenarios_per_worker', 'scenarios'}
+            params.scenarios_per_worker = double(val);
+            params = localMarkExplicit(params, 'scenarios_per_worker');
+        case {'train_ratio'}
+            params.train_ratio = double(val);
+            params = localMarkExplicit(params, 'train_ratio');
+        case {'val_ratio'}
+            params.val_ratio = double(val);
+            params = localMarkExplicit(params, 'val_ratio');
+        case {'headless'}
+            params.headless = logical(val);
+            params = localMarkExplicit(params, 'headless');
+        case {'enable_visualization'}
+            params.enable_visualization = logical(val);
+            params = localMarkExplicit(params, 'enable_visualization');
+        case {'auto_flight_demo'}
+            params.auto_flight_demo = logical(val);
+            params = localMarkExplicit(params, 'auto_flight_demo');
+        case {'drone_spawn_above_pad_m'}
+            params.drone_spawn_above_pad_m = double(val);
+            params = localMarkExplicit(params, 'drone_spawn_above_pad_m');
+        case {'landing_pad_size_xy'}
+            params.landing_pad_size_xy = double(val);
+            params = localMarkExplicit(params, 'landing_pad_size_xy');
+        case {'demo_takeoff_alt_m'}
+            params.demo_takeoff_alt_m = double(val);
+            params = localMarkExplicit(params, 'demo_takeoff_alt_m');
+        case {'control_backend'}
+            params.control_backend = lower(strtrim(char(string(val))));
+            params = localMarkExplicit(params, 'control_backend');
+        case {'reset_spawn_z_m'}
+            params.reset_spawn_z_m = double(val);
+            params = localMarkExplicit(params, 'reset_spawn_z_m');
+        case {'mavlink_precheck_timeout_s'}
+            params.mavlink_precheck_timeout_s = double(val);
+            params = localMarkExplicit(params, 'mavlink_precheck_timeout_s');
+        otherwise
+            error('[AutoLandingMainFull] Unsupported parameter key: %s', key);
+    end
+end
+end
+
+function mode = localResolveMode(params)
+mode = "full";
+if isstruct(params) && isfield(params, 'mode')
+    candidate = string(params.mode);
+    if strlength(candidate) > 0
+        mode = lower(strtrim(candidate));
+    end
+end
+end
+
+function params = localDefaultRunParams()
+params = struct();
+params.explicit_fields__ = {};
+params.mode = 'full';
+params.num_drones = 1;
+params.num_landing_pads = 1;
+params.scenarios_per_worker = 10;
+params.train_ratio = 0.8;
+params.val_ratio = 0.2;
+params.headless = false;
+params.enable_visualization = true;
+params.auto_flight_demo = false;
+params.drone_spawn_above_pad_m = 0.35;
+params.landing_pad_size_xy = 2.4;
+params.demo_takeoff_alt_m = 1.2;
+params.control_backend = 'mavros';
+params.mavlink_precheck_timeout_s = 90.0;
+end
+
+function out = localMergeParams(base, overrides)
+out = base;
+if ~isstruct(overrides)
+    return;
+end
+names = fieldnames(overrides);
+if isfield(overrides, 'explicit_fields__')
+    names = setdiff(names, {'explicit_fields__'});
+end
+for i = 1:numel(names)
+    out.(names{i}) = overrides.(names{i});
+end
+if ~isfield(out, 'explicit_fields__') || ~iscell(out.explicit_fields__)
+    out.explicit_fields__ = {};
+end
+out.explicit_fields__ = unique([out.explicit_fields__(:); names(:)]);
+if isfield(overrides, 'explicit_fields__') && iscell(overrides.explicit_fields__)
+    out.explicit_fields__ = unique([out.explicit_fields__(:); overrides.explicit_fields__(:)]);
+end
+end
+
+function params = localMarkExplicit(params, field_name)
+if ~isfield(params, 'explicit_fields__') || ~iscell(params.explicit_fields__)
+    params.explicit_fields__ = {};
+end
+params.explicit_fields__ = unique([params.explicit_fields__(:); {char(field_name)}]);
+end
+
+function tf = localNeedsSimulation(mode)
+tf = any(strcmp(mode, {"full", "collect", "collect_parallel", "mission", "sim", "gui", "server", "headless"}));
+end
+
+function localEnsureSimulationStack(rootDir, run_params)
+launcher = fullfile(rootDir, 'scripts', 'verify_gz_ardupilot_stack.sh');
+if ~isfile(launcher)
+    error('[AutoLandingMainFull] Missing simulator launcher: %s', launcher);
+end
+
+fprintf('[AutoLandingMainFull] Preparing Gazebo/SITL stack...\n');
+force_headless = true;
+if nargin >= 2 && isstruct(run_params) && isfield(run_params, 'headless')
+    force_headless = logical(run_params.headless);
+end
+if force_headless
+    cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=1 bash "%s"', launcher);
+else
+    cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=0 bash "%s"', launcher);
+end
+[status, output] = system(cmd);
+if status ~= 0
+    error('[AutoLandingMainFull] Failed to prepare Gazebo/SITL stack (exit=%d): %s', status, strtrim(output));
+end
+fprintf('[AutoLandingMainFull] Gazebo/SITL stack is ready.\n');
 end

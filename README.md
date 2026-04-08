@@ -1,14 +1,14 @@
 # autolanding_ws
 
-Python-first semantic autonomous landing workspace.
+MATLAB-first semantic autonomous landing workspace.
 
-This repository now uses Python as the primary orchestration layer for:
+The primary orchestration layer is MATLAB for:
 - pipeline execution
-- simulation stack launch
-- collection/parallel collection orchestration
-- paper figure generation
+- simulation and mission control
+- data collection and model training
+- validation and paper-style plot generation
 
-MATLAB entry files are retained only as compatibility wrappers that forward to the Python launcher.
+Python remains available for auxiliary visualization and research utilities, but it is no longer the default launcher path.
 
 ## 1. Research Formulation
 
@@ -76,62 +76,52 @@ J_land = sum_t (w_xy ||p_xy,t - p_m,xy||^2 + w_z (z_t - z_m)^2 + w_v ||v_t||^2)
 
 필요 시 위 개별 토픽 키만 별도로 override할 수 있습니다.
 
-## 2. Python Orchestrator
+## 2. MATLAB Orchestrator
 
 Main entrypoint:
-- scripts/autolanding_launcher.py
+- matlab/AutoLandingMainFull.m
 
 Supported modes:
+- full
 - pipeline
 - validation
-- plot
 - mission
 - sim
-- stack
 - collect
 - collect_parallel
-- research
 
 Examples:
 
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
 
-python3 scripts/autolanding_launcher.py pipeline \
-  --workspace-root "$PWD" \
-  --semantic-input data/samples/semantic_input_example.json \
-  --config ai/configs/policy_config.yaml
-
-python3 scripts/autolanding_launcher.py sim --workspace-root "$PWD" --gui
-python3 scripts/autolanding_launcher.py collect_parallel --workspace-root "$PWD" --workers 3 --scenarios-per-worker 2
-python3 scripts/autolanding_launcher.py research --workspace-root "$PWD" --config ai/configs/policy_config.yaml
+matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
+matlab -batch "run('matlab/scripts/run_autolanding_validation.m')"
+matlab -batch "run('matlab/run_autolanding_mission.m')"
+matlab -batch "run('matlab/run_autolanding_sim.m')"
 ```
 
 ### 2.x 연구 벤치마크 (제안모델 vs 베이스라인)
 
-아래 명령은 데이터 수집(합성 샘플 생성) + 학습/검증을 한 번에 수행합니다.
+아래 명령은 MATLAB full pipeline(수집 + 학습 + 검증 + 플롯)을 한 번에 수행합니다.
 
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
-source .venv/bin/activate
-
-python3 scripts/run_research_benchmark.py \
-  --workspace-root "$PWD" \
-  --samples 4000 \
-  --config ai/configs/policy_config.yaml
+matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
 ```
 
 산출물:
-- data/processed/research_dataset.csv
-- data/processed/research_dataset_meta.json
-- data/processed/research_train_validate_summary.json
-- data/models/research_linear_models.json
+- data/processed/landing_trajectory_matlab.json
+- data/processed/landing_trajectory_matlab.csv
+- data/processed/validation_report_matlab.json
+- data/processed/workspace_summary_<timestamp>.json
+- data/models/<timestamp>_scenarios_<N>/training_summary.json
 
-`research_train_validate_summary.json`에는 다음이 포함됩니다.
+`training_summary.json`에는 다음이 포함됩니다.
 - 제안모델(온톨로지+AI) 검증 지표
 - 베이스라인(AI-only) 검증 지표
-- RMSE/MAE 개선율(%)
-- "유사 혹은 우세" 판정 플래그
+- train/validation 분할 정보
+- 모델 저장 경로 및 비교 요약
 
 ### 2.0 시뮬레이션 시작: Gazebo + ArduPilot
 
@@ -189,18 +179,13 @@ source .venv/bin/activate
 /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/simulation/launch/start_gz_ardupilot.sh --kill-existing --dry-run --no-duplicate-check
 
 # 3) 파이프라인 완료형 검증 (산출물 생성 확인)
-/home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws/.venv/bin/python scripts/autolanding_launcher.py pipeline \
-  --workspace-root "$PWD" \
-  --semantic-input data/samples/semantic_input_example.json \
-  --config ai/configs/policy_config.yaml \
-  --orchestration-config ai/configs/orchestration_config.yaml \
-  --no-plots
+matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
 ```
 
 검증 완료 후 확인할 출력 파일:
-- `data/processed/landing_trajectory.json`
-- `data/processed/landing_trajectory.csv`
-- `data/processed/landing_trajectory_model_validation.json`
+- `data/processed/landing_trajectory_matlab.json`
+- `data/processed/landing_trajectory_matlab.csv`
+- `data/processed/validation_report_matlab.json`
 
 **옵션 조합 예제:**
 
@@ -274,11 +259,11 @@ bash scripts/run_full_pipeline.sh --keep-sim
 - 없으면 `semantic_input.target`
 
 착륙 제어기 선택:
-- `landing_controller: auto` -> 학습 모델(`data/models/research_linear_models.json`)이 있으면 `model`, 없으면 `pid`
+- `landing_controller: auto` -> 학습 모델(`data/models/model_hybrid_ontology_ai.mat`)이 있으면 `model`, 없으면 `pid`
 - `landing_controller: model|pid|png` 강제 지정 가능
 
 착륙 데이터 수집 산출물:
-- `data/collected/landing_controller_rollout_<timestamp>.csv`
+- `data/collected/<timestamp>/worker_<n>/session_<timestamp>/raw_data.mat`
 
 변경 가능한 실행 파라미터 파일:
 - ai/configs/orchestration_config.yaml
@@ -292,20 +277,7 @@ bash scripts/run_full_pipeline.sh --keep-sim
 
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
-
-# 1) 가상환경 생성
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 2) 의존성 설치
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-
-# 3) 파이프라인 실행
-python3 scripts/autolanding_launcher.py pipeline \
-  --workspace-root "$PWD" \
-  --semantic-input data/samples/semantic_input_example.json \
-  --config ai/configs/policy_config.yaml
+matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
 ```
 
 ### 2.3 "Configuring a Python Environment"에서 멈춘 것처럼 보일 때
@@ -322,52 +294,44 @@ python3 scripts/autolanding_launcher.py pipeline \
 
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
-which python3
-python3 --version
-python3 -c "import yaml, matplotlib; print('deps_ok')"
+which matlab
+matlab -batch "disp('deps_ok')"
 ```
 
 플롯 단계가 환경 문제로 실패하면 임시로 플롯을 끄고 실행할 수 있습니다.
 
 ```bash
-python3 scripts/autolanding_launcher.py pipeline \
-  --workspace-root "$PWD" \
-  --semantic-input data/samples/semantic_input_example.json \
-  --config ai/configs/policy_config.yaml \
-  --no-plots
+matlab -batch "run('matlab/scripts/run_autolanding_validation.m')"
 ```
 
 ## 3. MATLAB Compatibility
 
-The following MATLAB entrypoints now only forward to Python:
+The MATLAB entrypoints are now the primary execution path:
 - matlab/AutoLandingMain.m
 - matlab/AutoLandingMainFull.m
 - matlab/AutoLandingDataParallel.m
 
-If scripts/autolanding_launcher.py is unavailable, these wrappers fail fast with a clear error.
+Legacy Python launcher scripts were removed, and the runtime path is MATLAB-first.
 
 ## 4. Paper Plot Outputs
 
-Python plot module:
-- src/paper_plots.py
-
-Generated outputs:
-- data/plots/paper/paper_trajectory_summary.png
-- data/plots/paper/paper_trajectory_summary.pdf
+MATLAB comparison plots are generated during the training/validation stage and copied into the paper plot directory:
 - data/plots/paper/paper_model_comparison.png
-- data/plots/paper/paper_model_comparison.pdf
-- data/plots/paper/paper_model_comparison_metrics.csv
-- data/plots/paper/paper_model_comparison_metrics.json
+- data/plots/paper/paper_model_comparison.fig
+
+Additional MATLAB outputs:
+- data/plots/model_comparison.png
+- data/plots/model_comparison.fig
 
 Validation output:
-- data/processed/landing_trajectory_model_validation.json
+- data/processed/validation_report_matlab.json
 
 Collection orchestration summary output:
-- data/processed/collection_orchestration_summary.json
+- data/processed/workspace_summary_<timestamp>.json
 
 ## 5. Scripts
 
-Helper scripts call the Python launcher:
+Helper scripts call MATLAB batch entrypoints:
 - scripts/run_pipeline.sh
 - scripts/run_pipeline_matlab.sh
 - scripts/run_validation_matlab.sh
@@ -376,11 +340,11 @@ Helper scripts call the Python launcher:
 
 ## 6. Testing
 
-Run smoke tests:
+Run foreground smoke validation:
 
 ```bash
 cd /home/j/SynologyDrive/INCSL/devel/INCSL/autolanding_ws
-python3 -m unittest tests/test_pipeline_smoke.py
+bash scripts/run_full_pipeline.sh
 ```
 
 For ROS2 package build checks, see the ROS2 scaffold section below.

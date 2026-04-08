@@ -2,11 +2,15 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-python3 "$ROOT_DIR/scripts/autolanding_launcher.py" pipeline \
-  --workspace-root "$ROOT_DIR" \
-  --semantic-input "$ROOT_DIR/data/samples/semantic_input_example.json" \
-  --config "$ROOT_DIR/ai/configs/policy_config.yaml"
+
+cd "$ROOT_DIR"
+if command -v matlab >/dev/null 2>&1; then
+  matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
+else
+  echo "[error] matlab command not found."
+  exit 1
+fi
 
 echo "[done] Outputs written to:"
-echo "  $ROOT_DIR/data/processed/landing_trajectory.json"
-echo "  $ROOT_DIR/data/processed/landing_trajectory.csv"
+echo "  $ROOT_DIR/data/processed/landing_trajectory_matlab.json"
+echo "  $ROOT_DIR/data/processed/landing_trajectory_matlab.csv"

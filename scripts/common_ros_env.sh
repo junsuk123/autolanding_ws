@@ -22,6 +22,7 @@ autl_source_ros_stacks() {
   local p
 
   setup_candidates+=("/opt/ros/${ROS_DISTRO:-humble}/setup.bash")
+  setup_candidates+=("$root_dir/ardu_ws/install/setup.bash")
   setup_candidates+=("${AUTOLANDING_ROS_WS:-}/install/setup.bash")
   setup_candidates+=("${ARDUPILOT_ROS_WS:-}/install/setup.bash")
   setup_candidates+=("$HOME/ardu_ws/install/setup.bash")

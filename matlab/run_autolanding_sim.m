@@ -22,6 +22,7 @@ ws_root = fileparts(fileparts(mfilename('fullpath')));
 fprintf('[SETUP] Workspace root: %s\n', ws_root);
 
 % Add modules to path
+addpath(fullfile(ws_root, 'matlab'));
 mod_dir = fullfile(ws_root, 'matlab', 'modules');
 if exist(mod_dir, 'dir')
     addpath(mod_dir);
@@ -63,12 +64,7 @@ end
 % Run full end-to-end pipeline from single entrypoint.
 fprintf('\n[SIMULATION] Starting full simulation via AutoLandingMainFull...\n');
 try
-    mode_env = strtrim(getenv('AUTOLANDING_GAZEBO_MODE'));
-    if strcmpi(mode_env, 'server') || strcmpi(mode_env, 'headless')
-        AutoLandingMainFull('server');
-    else
-        AutoLandingMainFull('gui');
-    end
+    AutoLandingMainFull('sim');
     fprintf('\n[SUCCESS] Simulation completed!\n');
 catch ME
     fprintf('\n[ERROR] Simulation failed: %s\n', ME.message);

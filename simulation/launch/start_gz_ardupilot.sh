@@ -272,7 +272,7 @@ fi
 # ============================================================================
 LAUNCH_FILE="${EXAMPLE}.launch.py"
 OFFICIAL_CMD=(ros2 launch ardupilot_gz_bringup "$LAUNCH_FILE")
-LOCAL_CMD=(python3 scripts/autolanding_launcher.py full --orchestration-config ai/configs/orchestration_config.yaml)
+LOCAL_CMD=(bash "$ROOT_DIR/scripts/verify_gz_ardupilot_stack.sh")
 
 echo "[info] GZ_VERSION=$GZ_VERSION"
 echo "[info] GZ_SIM_SYSTEM_PLUGIN_PATH=${GZ_SIM_SYSTEM_PLUGIN_PATH:-<unset>}"
@@ -295,17 +295,17 @@ if ros2 pkg prefix ardupilot_gz_bringup >/dev/null 2>&1; then
 fi
 
 # Fall back to local launcher
-if [[ -f "$ROOT_DIR/scripts/autolanding_launcher.py" ]]; then
-	echo "[info] ROS2 package 'ardupilot_gz_bringup' not found; using local fallback launcher:"
+if [[ -f "$ROOT_DIR/scripts/verify_gz_ardupilot_stack.sh" ]]; then
+	if [[ "${AUTOLANDING_SKIP_LOCAL_FALLBACK:-0}" == "1" ]]; then
+		echo "[error] Local fallback disabled by AUTOLANDING_SKIP_LOCAL_FALLBACK=1, but official ROS2 launcher is unavailable." >&2
+		exit 1
+	fi
+	echo "[info] ROS2 package 'ardupilot_gz_bringup' not found; using local Gazebo+SITL fallback launcher:"
 	echo "[info] ${LOCAL_CMD[*]}"
 	cd "$ROOT_DIR"
-	if [[ -f .venv/bin/activate ]]; then
-		# shellcheck disable=SC1091
-		source .venv/bin/activate
-	fi
 	exec "${LOCAL_CMD[@]}"
 fi
 
 echo "[error] Neither official package nor local launcher found!"
-echo "[error] Expected: $ROOT_DIR/scripts/autolanding_launcher.py"
+echo "[error] Expected: $ROOT_DIR/scripts/verify_gz_ardupilot_stack.sh"
 exit 1

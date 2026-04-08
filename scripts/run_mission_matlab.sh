@@ -64,16 +64,12 @@ else
     echo "  Terminal 2: ./build/sitl/bin/arducopter --model JSON:127.0.0.1 ..."
 fi
 
-# Run Python mission launcher
+# Run MATLAB mission launcher
 echo ""
-echo "[LAUNCH] Starting Python mission launcher..."
+echo "[LAUNCH] Starting MATLAB mission launcher..."
 cd "$WS_ROOT"
 
-python3 "$WS_ROOT/scripts/autolanding_launcher.py" mission \
-    --workspace-root "$WS_ROOT" \
-    --semantic-input "$WS_ROOT/data/samples/semantic_input_example.json" \
-    --config "$WS_ROOT/ai/configs/policy_config.yaml" \
-    --gui
+matlab -batch "run('matlab/run_autolanding_mission.m')"
 
 echo ""
 echo "========================================"

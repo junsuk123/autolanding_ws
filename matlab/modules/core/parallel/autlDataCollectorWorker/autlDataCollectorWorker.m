@@ -149,6 +149,9 @@ try
         if ~isfield(mission_cfg, 'mavlink_master')
             mission_cfg.mavlink_master = 'tcp:127.0.0.1:5760';
         end
+        if ~isfield(mission_cfg, 'mavlink_master_fallback')
+            mission_cfg.mavlink_master_fallback = '';
+        end
         if ~isfield(mission_cfg, 'mavlink_control_timeout_s')
             mission_cfg.mavlink_control_timeout_s = 30.0;
         end
@@ -158,8 +161,7 @@ try
         % Keep probes bounded, but avoid too-short timeouts that cause false readiness failures.
         mission_cfg.mavlink_precheck_timeout_s = min(30.0, max(6.0, double(mission_cfg.mavlink_precheck_timeout_s)));
         mission_cfg.mavlink_control_timeout_s = min(30.0, max(6.0, double(mission_cfg.mavlink_control_timeout_s)));
-        if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1
-            if strcmp(char(string(mission_cfg.mavlink_master)), 'tcp:127.0.0.1:5760')
+        if isfield(mission_cfg, 'enable_auto_motion') && mission_cfg.enable_auto_motion && worker_id ~= 1 && isfield(config, 'num_workers') && config.num_workers > 1
                 mission_cfg.enable_auto_motion = false;
                 fprintf(log_fid, '[Worker %d] Auto motion disabled: shared MAVLink master (%s).\n', worker_id, char(string(mission_cfg.mavlink_master)));
             else
@@ -395,7 +397,7 @@ if ~isfield(mission_cfg, 'spawn_angle_deg')
     mission_cfg.spawn_angle_deg = 15.0;
 end
 if ~isfield(mission_cfg, 'reset_spawn_z_m')
-    mission_cfg.reset_spawn_z_m = 0.195;
+    mission_cfg.reset_spawn_z_m = 0.5;
 end
 if ~isfield(mission_cfg, 'reset_spawn_yaw_deg')
     mission_cfg.reset_spawn_yaw_deg = 90.0;
@@ -465,7 +467,7 @@ function [ok, msg] = autlWaitForMavlinkReady(mission_cfg)
 ok = false;
 msg = '';
 
-master_conn = 'tcp:127.0.0.1:5762';
+master_conn = 'tcp:127.0.0.1:5760';
 if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
     master_conn = char(string(mission_cfg.mavlink_master));
 end
@@ -553,7 +555,7 @@ function [ok, msg] = autlResetArduPilotState(mission_cfg)
 ok = false;
 parts = strings(0, 1);
 
-master_conn = 'tcp:127.0.0.1:5762';
+master_conn = 'tcp:127.0.0.1:5760';
 if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
     master_conn = char(string(mission_cfg.mavlink_master));
 end

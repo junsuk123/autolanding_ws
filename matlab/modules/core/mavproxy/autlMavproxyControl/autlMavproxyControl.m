@@ -22,7 +22,7 @@ function result = autlMavproxyControl(action, params, cfg)
     
     % Default MAVProxy connection
     if ~isfield(cfg, 'mav') || ~isfield(cfg.mav, 'master_connection')
-        % Use the SITL master endpoint (SERIAL0) by default.
+        % Use the SITL MAVLink TCP endpoint by default.
         master_conn = 'tcp:127.0.0.1:5760';
     else
         master_conn = cfg.mav.master_connection;
@@ -216,7 +216,14 @@ function result = autlMavproxyControl(action, params, cfg)
             % Use a here-doc to avoid shell escaping issues.
             % Guard with shell timeout so TCP connect stalls cannot block workers indefinitely.
             shell_timeout_s = max(3, ceil(timeout + 2));
-            cmd = sprintf('timeout %d python3 - <<''PY''\n%s\nPY', shell_timeout_s, py_code);
+            py_exec = 'python3';
+            this_file = mfilename('fullpath');
+            root_dir = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+            venv_py = fullfile(root_dir, '.venv', 'bin', 'python');
+            if exist(venv_py, 'file') == 2
+                py_exec = venv_py;
+            end
+            cmd = sprintf('timeout %d "%s" - <<''PY''\n%s\nPY', shell_timeout_s, py_exec, py_code);
             [rc, cmd_out] = system(cmd);
 
             if (rc == 0) && contains(cmd_out, 'OK')
@@ -483,10 +490,45 @@ if rc == 0
     out_low = lower(char(string(out)));
     service_ok = true;
     if ismember(lower(action), {'arm', 'disarm', 'takeoff', 'land'})
-        service_ok = ~isempty(regexp(out_low, 'success\s*:\s*true', 'once'));
+        service_ok = ~isempty(regexp(out_low, 'success\s*[:=]\s*(true|1)', 'once'));
     elseif strcmpi(action, 'set_mode')
-        service_ok = ~isempty(regexp(out_low, 'mode_sent\s*:\s*true', 'once')) || ...
-                     ~isempty(regexp(out_low, 'success\s*:\s*true', 'once'));
+        service_ok = ~isempty(regexp(out_low, 'mode_sent\s*[:=]\s*(true|1)', 'once')) || ...
+                     ~isempty(regexp(out_low, 'success\s*[:=]\s*(true|1)', 'once'));
+    end
+
+    if strcmpi(action, 'arm') && ~service_ok
+        [force_ok, force_out] = autlTryMavrosForceArm(ns, source_overlay, shell_timeout_s);
+        result.output = sprintf('%s\n[force_arm_fallback]\n%s', char(string(result.output)), char(string(force_out)));
+        if force_ok
+            service_ok = true;
+        else
+            service_ok = false;
+            out = sprintf('%s\n[force_arm_fallback]\n%s', char(string(out)), char(string(force_out)));
+        end
+    end
+
+    if strcmpi(action, 'set_mode') && ~service_ok && isfield(params, 'mode')
+        [mode_ok, mode_out] = autlTryMavrosForceSetMode(ns, source_overlay, shell_timeout_s, char(string(params.mode)));
+        result.output = sprintf('%s\n[force_mode_fallback]\n%s', char(string(result.output)), char(string(mode_out)));
+        if mode_ok
+            service_ok = true;
+        else
+            out = sprintf('%s\n[force_mode_fallback]\n%s', char(string(out)), char(string(mode_out)));
+        end
+    end
+
+    if strcmpi(action, 'takeoff') && ~service_ok
+        h_fallback = 3.0;
+        if isfield(params, 'height')
+            h_fallback = double(params.height);
+        end
+        [tk_ok, tk_out] = autlTryMavrosForceTakeoff(ns, source_overlay, shell_timeout_s, h_fallback);
+        result.output = sprintf('%s\n[force_takeoff_fallback]\n%s', char(string(result.output)), char(string(tk_out)));
+        if tk_ok
+            service_ok = true;
+        else
+            out = sprintf('%s\n[force_takeoff_fallback]\n%s', char(string(out)), char(string(tk_out)));
+        end
     end
 
     if service_ok
@@ -514,6 +556,46 @@ if rc == 0
         result.error_message = strtrim(out);
     end
 else
+    if strcmpi(action, 'arm')
+        [force_ok, force_out] = autlTryMavrosForceArm(ns, source_overlay, shell_timeout_s);
+        result.output = sprintf('%s\n[force_arm_fallback]\n%s', char(string(result.output)), char(string(force_out)));
+        if force_ok
+            result.is_success = true;
+            result.status = 'armed';
+            ok = true;
+            return;
+        else
+            out = sprintf('%s\n[force_arm_fallback]\n%s', char(string(out)), char(string(force_out)));
+        end
+    end
+    if strcmpi(action, 'set_mode') && isfield(params, 'mode')
+        [mode_ok, mode_out] = autlTryMavrosForceSetMode(ns, source_overlay, shell_timeout_s, char(string(params.mode)));
+        result.output = sprintf('%s\n[force_mode_fallback]\n%s', char(string(result.output)), char(string(mode_out)));
+        if mode_ok
+            result.is_success = true;
+            result.status = 'mode_set';
+            ok = true;
+            return;
+        else
+            out = sprintf('%s\n[force_mode_fallback]\n%s', char(string(out)), char(string(mode_out)));
+        end
+    end
+    if strcmpi(action, 'takeoff')
+        h_fallback = 3.0;
+        if isfield(params, 'height')
+            h_fallback = double(params.height);
+        end
+        [tk_ok, tk_out] = autlTryMavrosForceTakeoff(ns, source_overlay, shell_timeout_s, h_fallback);
+        result.output = sprintf('%s\n[force_takeoff_fallback]\n%s', char(string(result.output)), char(string(tk_out)));
+        if tk_ok
+            result.is_success = true;
+            result.status = 'takeoff_initiated';
+            ok = true;
+            return;
+        else
+            out = sprintf('%s\n[force_takeoff_fallback]\n%s', char(string(out)), char(string(tk_out)));
+        end
+    end
     result.is_success = false;
     result.status = 'mavros_action_failed';
     if rc == 124
@@ -521,6 +603,90 @@ else
     else
         result.error_message = strtrim(out);
     end
+end
+end
+
+function [ok, out] = autlTryMavrosForceArm(ns, source_overlay, shell_timeout_s)
+% Retry arm via MAV_CMD_COMPONENT_ARM_DISARM with force magic value (21196).
+
+ok = false;
+out = '';
+
+cmd = sprintf(['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' ...
+    '%sset -u; timeout %d ros2 service call %s/cmd/command mavros_msgs/srv/CommandLong ' ...
+    '"{broadcast: false, command: 400, confirmation: 0, param1: 1.0, param2: 21196.0, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: 0.0}"'''], ...
+    source_overlay, shell_timeout_s, ns);
+
+[rc, cmd_out] = system(cmd);
+out = cmd_out;
+if rc == 0
+    out_low = lower(char(string(cmd_out)));
+    ok = ~isempty(regexp(out_low, 'success\s*[:=]\s*(true|1)', 'once'));
+end
+end
+
+function [ok, out] = autlTryMavrosForceSetMode(ns, source_overlay, shell_timeout_s, mode_name)
+% Retry mode change via MAV_CMD_DO_SET_MODE with ArduPilot custom mode ids.
+
+ok = false;
+out = '';
+
+[known_mode, custom_mode] = autlMapArduCopterModeId(mode_name);
+if ~known_mode
+    out = sprintf('unsupported mode for force set_mode fallback: %s', mode_name);
+    return;
+end
+
+cmd = sprintf(['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' ...
+    '%sset -u; timeout %d ros2 service call %s/cmd/command mavros_msgs/srv/CommandLong ' ...
+    '"{broadcast: false, command: 176, confirmation: 0, param1: 1.0, param2: %.1f, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: 0.0}"'''], ...
+    source_overlay, shell_timeout_s, ns, custom_mode);
+
+[rc, cmd_out] = system(cmd);
+out = cmd_out;
+if rc == 0
+    out_low = lower(char(string(cmd_out)));
+    ok = ~isempty(regexp(out_low, 'success\s*[:=]\s*(true|1)', 'once'));
+end
+end
+
+function [ok, out] = autlTryMavrosForceTakeoff(ns, source_overlay, shell_timeout_s, height_m)
+% Retry takeoff via MAV_CMD_NAV_TAKEOFF command-long path.
+
+ok = false;
+out = '';
+
+cmd = sprintf(['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' ...
+    '%sset -u; timeout %d ros2 service call %s/cmd/command mavros_msgs/srv/CommandLong ' ...
+    '"{broadcast: false, command: 22, confirmation: 0, param1: 0.0, param2: 0.0, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: %.3f}"'''], ...
+    source_overlay, shell_timeout_s, ns, double(height_m));
+
+[rc, cmd_out] = system(cmd);
+out = cmd_out;
+if rc == 0
+    out_low = lower(char(string(cmd_out)));
+    ok = ~isempty(regexp(out_low, 'success\s*[:=]\s*(true|1)', 'once'));
+end
+end
+
+function [ok, mode_id] = autlMapArduCopterModeId(mode_name)
+% Map common ArduCopter mode names to custom mode ids used by DO_SET_MODE.
+
+ok = true;
+mode_id = -1;
+switch upper(strtrim(char(string(mode_name))))
+    case 'STABILIZE'
+        mode_id = 0;
+    case 'ALT_HOLD'
+        mode_id = 2;
+    case 'LOITER'
+        mode_id = 5;
+    case 'GUIDED'
+        mode_id = 4;
+    case 'LAND'
+        mode_id = 9;
+    otherwise
+        ok = false;
 end
 end
 
@@ -533,6 +699,7 @@ out = '';
 
 poll_s = 0.8;
 start_t = tic;
+saw_state_msg = false;
 
 while toc(start_t) < timeout_s
     remain_s = max(1, ceil(timeout_s - toc(start_t)));
@@ -544,6 +711,7 @@ while toc(start_t) < timeout_s
 
     if rc == 0
         out_low = lower(char(string(cmd_out)));
+        saw_state_msg = true;
         if contains(out_low, 'connected: true')
             ok = true;
             msg = 'connected';
@@ -560,6 +728,14 @@ while toc(start_t) < timeout_s
     end
 
     pause(poll_s);
+end
+
+if saw_state_msg
+    % Some SITL builds publish /mavros/state while keeping connected=false.
+    % Allow action attempts and let service call result decide final success.
+    ok = true;
+    msg = 'state available (connected flag false)';
+    return;
 end
 
 msg = sprintf('MAVROS FCU not connected on %s within %.1fs (%s)', ns, timeout_s, msg);

@@ -19,15 +19,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def _run_algorithm(timeout_s: int) -> dict:
     cmd = [
-        'python3',
-        str(ROOT / 'scripts' / 'autolanding_launcher.py'),
-        'pipeline',
-        '--workspace-root',
-        str(ROOT),
-        '--semantic-input',
-        str(ROOT / 'data' / 'samples' / 'semantic_input_example.json'),
-        '--config',
-        str(ROOT / 'ai' / 'configs' / 'policy_config.yaml'),
+        'matlab',
+        '-batch',
+        "run('matlab/scripts/run_autolanding_pipeline.m')",
     ]
     try:
         proc = subprocess.run(

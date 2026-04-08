@@ -1,32 +1,30 @@
 # Deprecated Shell Scripts
 
-These shell scripts have been replaced by Python-based launchers for better maintainability and robustness.
+These shell scripts were replaced by MATLAB batch entrypoints for the main pipeline. The Python launchers below are legacy helper scripts kept for reference and auxiliary tooling.
 
 ## Replacement Mapping
 
-| Deprecated Shell Script | Python Replacement | Notes |
-|------------------------|--------------------|-------|
-| `launch_multi_drone_sitl.sh` | `launch_multi_drone_py.py` | Starts N ArduPilot SITL instances |
-| `launch_multi_mavros.sh` | `launch_multi_mavros_py.py` | Starts N MAVROS instances with namespacing |
-| `launch_rviz_monitor.sh` | `launch_rviz_monitor_py.py` | Launches RViz + ArUco + ros_gz_bridge |
+| Deprecated Shell Script | Active Replacement | Notes |
+|------------------------|-------------------|-------|
+| `launch_multi_drone_sitl.sh` | `matlab/scripts/run_autolanding_pipeline.m` | Main pipeline entrypoint |
+| `launch_multi_mavros.sh` | `matlab/run_autolanding_mission.m` | Mission execution entrypoint |
+| `launch_rviz_monitor.sh` | `matlab/run_autolanding_sim.m` | Simulation/monitoring entrypoint |
 
-## Why Python?
+## Why MATLAB?
 
-1. **Cleaner Environment Handling**: Python scripts properly manage `GZ_SIM_RESOURCE_PATH`, fixing I1/I2 JSON readiness issues
-2. **Better Error Handling**: Structured error checking and logging
-3. **No Shell Escaping Issues**: Complex strings and paths are handled naturally by Python
-4. **Maintainability**: Self-contained with clear docstrings and arguments
-5. **Direct MATLAB Integration**: Called directly from MATLAB with minimal complexity
+1. **Single orchestration path**: Pipeline, collection, validation, and mission control now share the same MATLAB entrypoints
+2. **Config consistency**: One orchestration config drives the full workflow
+3. **Modular deployment**: Core logic stays in MATLAB modules, while Python remains optional for auxiliary tooling
 
 ## Migration Status
 
-All functionality has been migrated to Python launchers. Active deployment uses:
-- [launch_multi_drone_py.py](../launch_multi_drone_py.py)
-- [launch_gazebo_py.py](../launch_gazebo_py.py)
-- [launch_multi_mavros_py.py](../launch_multi_mavros_py.py)
-- [launch_rviz_monitor_py.py](../launch_rviz_monitor_py.py)
+All main functionality is now driven by MATLAB batch entrypoints:
+- [run_autolanding_pipeline.m](../../matlab/scripts/run_autolanding_pipeline.m)
+- [run_autolanding_validation.m](../../matlab/scripts/run_autolanding_validation.m)
+- [run_autolanding_mission.m](../../matlab/run_autolanding_mission.m)
+- [run_autolanding_sim.m](../../matlab/run_autolanding_sim.m)
 
-These are called automatically by `AutoLandingMainFull.m` in the STEP 0 initialization phase.
+The legacy Python helpers remain available only for auxiliary visualization and non-primary tooling.
 
 ## Archival
 

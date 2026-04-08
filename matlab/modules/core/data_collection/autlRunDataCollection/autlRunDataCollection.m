@@ -97,10 +97,31 @@ if ~isfield(mission_config, 'telemetry_query_interval_s')
     mission_config.telemetry_query_interval_s = 5.0;
 end
 if ~isfield(mission_config, 'mavlink_precheck_timeout_s')
-    mission_config.mavlink_precheck_timeout_s = 12.0;
+    mission_config.mavlink_precheck_timeout_s = 90.0;
 end
 if ~isfield(mission_config, 'mavlink_control_timeout_s') || isempty(mission_config.mavlink_control_timeout_s)
-    mission_config.mavlink_control_timeout_s = mission_config.mavlink_precheck_timeout_s;
+    mission_config.mavlink_control_timeout_s = 20.0;
+end
+if ~isfield(mission_config, 'mode_set_retries')
+    mission_config.mode_set_retries = 4;
+end
+if ~isfield(mission_config, 'arm_retries')
+    mission_config.arm_retries = 6;
+end
+if ~isfield(mission_config, 'control_retry_interval_s')
+    mission_config.control_retry_interval_s = 1.5;
+end
+if ~isfield(mission_config, 'post_mode_set_delay_s')
+    mission_config.post_mode_set_delay_s = 0.6;
+end
+if ~isfield(mission_config, 'startup_control_timeout_s')
+    mission_config.startup_control_timeout_s = 6.0;
+end
+if ~isfield(mission_config, 'allow_mavproxy_mode_fallback_on_mavros_reject')
+    mission_config.allow_mavproxy_mode_fallback_on_mavros_reject = false;
+end
+if ~isfield(mission_config, 'mavproxy_force_fallback_retries')
+    mission_config.mavproxy_force_fallback_retries = 2;
 end
 if ~isfield(mission_config, 'control_backend')
     mission_config.control_backend = 'mavproxy';
@@ -145,7 +166,7 @@ if ~isfield(mission_config, 'mavlink_master')
     mission_config.mavlink_master = 'tcp:127.0.0.1:5760';
 end
 if ~isfield(mission_config, 'mavlink_master_fallback')
-    mission_config.mavlink_master_fallback = 'tcp:127.0.0.1:5762';
+    mission_config.mavlink_master_fallback = '';
 end
 if ~isfield(mission_config, 'motion_profile')
     mission_config.motion_profile = 'balanced';
@@ -193,14 +214,29 @@ if ~isfield(mission_config, 'drone_set_pose_model_name')
         mission_config.drone_set_pose_model_name = 'iris_with_gimbal';
     end
 end
+if ~isfield(mission_config, 'drone_spawn_above_pad_m')
+    mission_config.drone_spawn_above_pad_m = 0.5;
+end
+if ~isfield(mission_config, 'aruco_box_height_m')
+    mission_config.aruco_box_height_m = 0.5;
+end
+if ~isfield(mission_config, 'enforce_spawn_above_pad')
+    mission_config.enforce_spawn_above_pad = true;
+end
 if ~isfield(mission_config, 'reset_spawn_z_m')
-    mission_config.reset_spawn_z_m = 0.195;
+    marker_top_z_m = mission_config.landing_pad_center(3) + 0.5 * max(0.05, double(mission_config.aruco_box_height_m));
+    mission_config.reset_spawn_z_m = marker_top_z_m + max(0.35, double(mission_config.drone_spawn_above_pad_m));
 end
 if ~isfield(mission_config, 'reset_spawn_xy') || numel(mission_config.reset_spawn_xy) < 2
     mission_config.reset_spawn_xy = mission_config.landing_pad_center(1:2);
 end
 if ~isfield(mission_config, 'reset_spawn_yaw_deg')
     mission_config.reset_spawn_yaw_deg = 0.0;
+end
+if logical(mission_config.enforce_spawn_above_pad)
+    marker_top_z_m = mission_config.landing_pad_center(3) + 0.5 * max(0.05, double(mission_config.aruco_box_height_m));
+    min_spawn_z_m = marker_top_z_m + max(0.35, double(mission_config.drone_spawn_above_pad_m));
+    mission_config.reset_spawn_z_m = max(double(mission_config.reset_spawn_z_m), min_spawn_z_m);
 end
 if ~isfield(mission_config, 'require_flight_quality')
     mission_config.require_flight_quality = true;
@@ -366,9 +402,21 @@ try
     control_cfg.control = struct('backend', mission_config.control_backend, ...
         'allow_backend_fallback', logical(mission_config.control_backend_fallback), ...
         'mavros_namespace', mission_config.mavros_namespace);
+    fallback_cfg = control_cfg;
+    fallback_cfg.control.backend = 'mavproxy';
+    fallback_cfg.control.allow_backend_fallback = true;
     control_cfg.flow_log_file = flow_log_file;
     control_cfg.flow_context = autlFlowMerge(flow_ctx, struct('module_scope', 'autlRunDataCollection'));
     control_cfg.flow_log_all_actions = false;
+    fallback_cfg.flow_log_file = flow_log_file;
+    fallback_cfg.flow_context = autlFlowMerge(flow_ctx, struct('module_scope', 'autlRunDataCollection', 'fallback_backend', 'mavproxy'));
+    fallback_cfg.flow_log_all_actions = false;
+
+    startup_control_cfg = control_cfg;
+    startup_fallback_cfg = fallback_cfg;
+    startup_timeout_s = max(2.0, double(mission_config.startup_control_timeout_s));
+    startup_control_cfg.mav.timeout_s = startup_timeout_s;
+    startup_fallback_cfg.mav.timeout_s = startup_timeout_s;
     fprintf('%s[AutoLandingDataCollection] Connecting to vehicle via %s (namespace=%s)...\n', ...
         log_prefix, upper(char(string(mission_config.control_backend))), char(string(mission_config.mavros_namespace)));
 
@@ -385,9 +433,14 @@ try
     % Publish landing pad spec topic so downstream consumers can subscribe.
     landing_pad_publish_status = autlPublishLandingPadTopic(mission_config, sessionDir, log_prefix);
     landing_pad_runtime = autlInitLandingPadRuntime(mission_config, log_prefix);
+    [snap_ok, snap_msg] = autlSnapDroneAbovePadOnce(mission_config, log_prefix);
+    if ~snap_ok
+        fprintf('%s[AutoLandingDataCollection] Drone initial snap skipped: %s\n', log_prefix, snap_msg);
+    end
     autlFlowLog(flow_log_file, 'autlRunDataCollection', 'landing_pad_runtime_ready', autlFlowMerge(flow_ctx, struct( ...
         'publish_ok', logical(landing_pad_publish_status.ok), 'publish_message', char(string(landing_pad_publish_status.message)), ...
-        'follow_enabled', logical(landing_pad_runtime.follow_enabled), 'apply_set_pose', logical(landing_pad_runtime.apply_set_pose))));
+        'follow_enabled', logical(landing_pad_runtime.follow_enabled), 'apply_set_pose', logical(landing_pad_runtime.apply_set_pose), ...
+        'drone_initial_snap_ok', logical(snap_ok), 'drone_initial_snap_message', char(string(snap_msg)))));
 
     % Arm/takeoff once so vehicle actually moves during collection.
     control_state = struct('arm_sent', false, 'takeoff_sent', false, 'last_control_time', -inf, 'precheck_failed', false);
@@ -413,31 +466,62 @@ try
 
     if mission_config.enable_auto_motion
         fprintf('%s[AutoLandingDataCollection] Auto motion: setting GUIDED mode...\n', log_prefix);
-        mode_res = autlMavproxyControl('set_mode', struct('mode', 'GUIDED'), control_cfg);
+        [mode_res, mode_attempts] = autlRunControlWithRetry('set_mode', struct('mode', 'GUIDED'), startup_control_cfg, ...
+            mission_config.mode_set_retries, mission_config.control_retry_interval_s);
         if ~mode_res.is_success
-            fprintf('%s[AutoLandingDataCollection] Warning: GUIDED mode set failed: %s\n', log_prefix, ...
-                autlCompactMavErrorTop(mode_res.error_message));
+            fprintf('%s[AutoLandingDataCollection] Warning: GUIDED mode set failed after %d attempt(s): %s\n', ...
+                log_prefix, mode_attempts, autlCompactMavErrorTop(mode_res.error_message));
+            if strcmpi(char(string(mission_config.control_backend)), 'mavros') && logical(mission_config.allow_mavproxy_mode_fallback_on_mavros_reject)
+                fprintf('%s[AutoLandingDataCollection] Auto motion: retrying GUIDED mode via MAVProxy fallback...\n', log_prefix);
+                [mode_fb_res, mode_fb_attempts] = autlRunControlWithRetry('set_mode', struct('mode', 'GUIDED'), startup_fallback_cfg, ...
+                    mission_config.mavproxy_force_fallback_retries, mission_config.control_retry_interval_s);
+                if mode_fb_res.is_success
+                    mode_res = mode_fb_res;
+                    fprintf('%s[AutoLandingDataCollection] Auto motion: GUIDED mode set via MAVProxy fallback (attempt %d)\n', ...
+                        log_prefix, mode_fb_attempts);
+                else
+                    fprintf('%s[AutoLandingDataCollection] Warning: MAVProxy fallback for GUIDED mode also failed: %s\n', ...
+                        log_prefix, autlCompactMavErrorTop(mode_fb_res.error_message));
+                end
+            end
         else
-            fprintf('%s[AutoLandingDataCollection] Auto motion: GUIDED mode set\n', log_prefix);
+            fprintf('%s[AutoLandingDataCollection] Auto motion: GUIDED mode set (attempt %d)\n', log_prefix, mode_attempts);
         end
+        pause(max(0.0, double(mission_config.post_mode_set_delay_s)));
 
         fprintf('%s[AutoLandingDataCollection] Auto motion: arming...\n', log_prefix);
-        arm_res = autlMavproxyControl('arm', struct(), control_cfg);
+        [arm_res, arm_attempts] = autlRunControlWithRetry('arm', struct(), startup_control_cfg, ...
+            mission_config.arm_retries, mission_config.control_retry_interval_s);
         control_state.arm_sent = arm_res.is_success;
         if ~arm_res.is_success
-            error('AutoLanding:ArmFailed', '%s[AutoLandingDataCollection] Arm failed: %s', ...
-                log_prefix, autlCompactMavErrorTop(arm_res.error_message));
+            error('AutoLanding:ArmFailed', '%s[AutoLandingDataCollection] Arm failed after %d attempt(s): %s', ...
+                log_prefix, arm_attempts, autlCompactMavErrorTop(arm_res.error_message));
         else
-            fprintf('%s[AutoLandingDataCollection] Auto motion: armed\n', log_prefix);
+            fprintf('%s[AutoLandingDataCollection] Auto motion: armed (attempt %d)\n', log_prefix, arm_attempts);
         end
 
         if control_state.arm_sent
             fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff %.2f m...\n', log_prefix, mission_config.takeoff_height_m);
-            takeoff_res = autlMavproxyControl('takeoff', struct('height', mission_config.takeoff_height_m), control_cfg);
+            takeoff_res = autlMavproxyControl('takeoff', struct('height', mission_config.takeoff_height_m), startup_control_cfg);
             control_state.takeoff_sent = takeoff_res.is_success;
             if ~takeoff_res.is_success
-                error('AutoLanding:TakeoffFailed', '%s[AutoLandingDataCollection] Takeoff failed: %s', ...
-                    log_prefix, autlCompactMavErrorTop(takeoff_res.error_message));
+                if strcmpi(char(string(mission_config.control_backend)), 'mavros') && logical(mission_config.allow_mavproxy_mode_fallback_on_mavros_reject)
+                    fprintf('%s[AutoLandingDataCollection] Auto motion: retrying takeoff via MAVProxy fallback...\n', log_prefix);
+                    [takeoff_fb_res, takeoff_fb_attempts] = autlRunControlWithRetry('takeoff', struct('height', mission_config.takeoff_height_m), startup_fallback_cfg, ...
+                        1, mission_config.control_retry_interval_s);
+                    control_state.takeoff_sent = takeoff_fb_res.is_success;
+                    if takeoff_fb_res.is_success
+                        fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff accepted via MAVProxy fallback (attempt %d)\n', ...
+                            log_prefix, takeoff_fb_attempts);
+                        takeoff_res = takeoff_fb_res;
+                    else
+                        error('AutoLanding:TakeoffFailed', '%s[AutoLandingDataCollection] Takeoff failed: %s | fallback: %s', ...
+                            log_prefix, autlCompactMavErrorTop(takeoff_res.error_message), autlCompactMavErrorTop(takeoff_fb_res.error_message));
+                    end
+                else
+                    error('AutoLanding:TakeoffFailed', '%s[AutoLandingDataCollection] Takeoff failed: %s', ...
+                        log_prefix, autlCompactMavErrorTop(takeoff_res.error_message));
+                end
             else
                 fprintf('%s[AutoLandingDataCollection] Auto motion: takeoff command accepted\n', log_prefix);
                 if mission_config.require_takeoff_confirmation_before_collection
@@ -1276,6 +1360,36 @@ while toc(start_t) < wait_timeout_s
     end
 end
 
+function [ok, msg] = autlEnsureGazeboSITLStackTop()
+ok = false;
+msg = "not_run";
+try
+    this_file = mfilename('fullpath');
+    root_dir = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+    launcher = fullfile(root_dir, 'scripts', 'verify_gz_ardupilot_stack.sh');
+    if exist(launcher, 'file') ~= 2
+        msg = "launcher_missing";
+        return;
+    end
+
+    log_path = fullfile(root_dir, 'data', 'logs', 'mavlink_stack_recovery.log');
+    cmd = sprintf('AUTOLANDING_FORCE_HEADLESS=1 timeout 180 bash "%s" > "%s" 2>&1', launcher, log_path);
+    [rc, out] = system(cmd);
+    if rc == 0
+        ok = true;
+        msg = "stack_ready";
+    else
+        if strlength(string(strtrim(out))) > 0
+            msg = "launcher_failed(rc=" + string(rc) + "):" + string(strtrim(out));
+        else
+            msg = "launcher_failed(rc=" + string(rc) + ") log=" + string(log_path);
+        end
+    end
+catch ME
+    msg = string(ME.message);
+end
+end
+
 if ~res.is_success
     res.error_message = sprintf('%s (waited %.1fs)', char(string(res.error_message)), wait_timeout_s);
 end
@@ -1552,6 +1666,87 @@ pad_spec.timestamp = char(datetime('now'));
 autlSaveJson(fullfile(sessionDir, 'landing_pad_spec.json'), pad_spec);
 end
 
+function gz_cmd = autlResolveGzCmd()
+% Resolve gz executable path for shell calls.
+
+partition = getenv('AUTOLANDING_GZ_PARTITION');
+if strlength(string(partition)) == 0
+    partition = 'autolanding';
+end
+
+if isfile('/usr/bin/gz')
+    gz_cmd = sprintf('env -u LD_LIBRARY_PATH GZ_PARTITION=%s /usr/bin/gz', char(partition));
+else
+    gz_cmd = sprintf('env -u LD_LIBRARY_PATH GZ_PARTITION=%s gz', char(partition));
+end
+end
+
+function service_name = autlResolveSetPoseService(wait_s)
+% Resolve /world/*/set_pose service with retry until timeout.
+% Tries multiple methods to discover Gazebo service.
+
+service_name = "";
+deadline = tic;
+max_wait = max(1.0, double(wait_s));
+gz_cmd = autlResolveGzCmd();
+
+% Method 1: Direct service list with timeout
+query_cmd = sprintf('bash -lc ''timeout 2 %s service -l 2>/dev/null | grep -E "^/world/.*/set_pose" | head -n1''', gz_cmd);
+attempt = 0;
+while toc(deadline) < max_wait
+    attempt = attempt + 1;
+    [rc, out] = system(query_cmd);
+    candidate = strtrim(string(out));
+    if rc == 0 && strlength(candidate) > 0
+        service_name = candidate;
+        return;
+    end
+    pause(0.5);
+end
+end
+
+function [ok, msg] = autlSnapDroneAbovePadOnce(mission_config, log_prefix)
+% Place drone model once at configured spawn pose to avoid overlap with landing marker.
+
+ok = false;
+msg = "set_pose_unavailable";
+svc = char(autlResolveSetPoseService(6.0));
+if strlength(string(svc)) == 0
+    return;
+end
+
+model_candidates = {char(string(mission_config.drone_set_pose_model_name))};
+if isfield(mission_config, 'reset_model_name') && strlength(string(mission_config.reset_model_name)) > 0
+    model_candidates{end+1} = char(string(mission_config.reset_model_name));
+end
+model_candidates = [model_candidates, {'iris_with_gimbal', 'iris_with_gimbal_0', 'iris'}];
+model_candidates = unique(model_candidates, 'stable');
+
+target_x = double(mission_config.reset_spawn_xy(1));
+target_y = double(mission_config.reset_spawn_xy(2));
+target_z = double(mission_config.reset_spawn_z_m);
+yaw_rad = deg2rad(double(mission_config.reset_spawn_yaw_deg));
+qz = sin(yaw_rad / 2.0);
+qw = cos(yaw_rad / 2.0);
+
+for i = 1:numel(model_candidates)
+    req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
+        'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
+        model_candidates{i}, target_x, target_y, target_z, qz, qw);
+    cmd = sprintf('bash -lc ''%s service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+        autlResolveGzCmd(), svc, req);
+    [rc, out] = system(cmd);
+    if rc == 0 && ~contains(lower(string(out)), 'false')
+        ok = true;
+        msg = "model=" + string(model_candidates{i}) + " z=" + string(sprintf('%.3f', target_z));
+        fprintf('%s[AutoLandingDataCollection] Drone initial snap applied: %s\n', log_prefix, char(msg));
+        return;
+    end
+end
+
+msg = "set_pose_failed";
+end
+
 function runtime = autlInitLandingPadRuntime(mission_config, log_prefix)
 % Initialize landing-pad topic follower and Gazebo pose updater.
 
@@ -1594,12 +1789,13 @@ if mission_config.landing_pad_follow_topic
 end
 
 if runtime.apply_set_pose
-    [svc_status, svc_out] = system('bash -lc ''gz service -l 2>/dev/null | grep -E "^/world/.*/set_pose$" | head -n1''');
-    if svc_status == 0 && strlength(string(strtrim(svc_out))) > 0
-        runtime.set_pose_service = char(string(strtrim(svc_out)));
-    else
+    fprintf('%s[AutoLandingDataCollection] Resolving Gazebo set_pose service (max 20s)...\n', log_prefix);
+    runtime.set_pose_service = char(autlResolveSetPoseService(20.0));
+    if strlength(string(runtime.set_pose_service)) == 0
         runtime.apply_set_pose = false;
-        fprintf('%s[AutoLandingDataCollection] Landing pad set_pose disabled: /world/*/set_pose not found.\n', log_prefix);
+        fprintf('%s[AutoLandingDataCollection] Landing pad set_pose disabled: /world/*/set_pose not found after 20s timeout.\n', log_prefix);
+    else
+        fprintf('%s[AutoLandingDataCollection] Landing pad set_pose enabled: %s\n', log_prefix, runtime.set_pose_service);
     end
 end
 end
@@ -1653,8 +1849,8 @@ if runtime.apply_set_pose && ((elapsed_s - runtime.last_pose_t) >= runtime.pose_
     req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
         'orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}'], ...
         runtime.pad_model_name, mission_config.landing_pad_center(1), mission_config.landing_pad_center(2), pose_z);
-    cmd = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
-        runtime.set_pose_service, req);
+    cmd = sprintf('bash -lc ''%s service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+        autlResolveGzCmd(), runtime.set_pose_service, req);
     [rc, out] = system(cmd);
     if ~(rc == 0 && ~contains(lower(string(out)), 'false')) && ~runtime.warned_pose
         fprintf('%s[AutoLandingDataCollection] Landing pad set_pose warning: rc=%d out=%s\n', log_prefix, rc, strtrim(string(out)));
@@ -1719,9 +1915,8 @@ end
 
 svc_deadline = tic;
 while toc(svc_deadline) < 12.0
-    [svc_status, svc_out] = system('bash -lc ''gz service -l 2>/dev/null | grep -E "^/world/.*/set_pose$" | head -n1''');
-    if svc_status == 0 && strlength(string(strtrim(svc_out))) > 0
-        runtime.set_pose_service = char(string(strtrim(svc_out)));
+    runtime.set_pose_service = char(autlResolveSetPoseService(0.8));
+    if strlength(string(runtime.set_pose_service)) > 0
         break;
     end
     pause(0.4);
@@ -1760,8 +1955,8 @@ qw = cos(target_yaw_rad / 2.0);
 req = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
     'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
     runtime.model_candidates{runtime.active_model_idx}, target_x, target_y, target_z, qz, qw);
-cmd = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
-    runtime.set_pose_service, req);
+cmd = sprintf('bash -lc ''%s service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+    autlResolveGzCmd(), runtime.set_pose_service, req);
 [rc, out] = system(cmd);
 
 ok = (rc == 0 && ~contains(lower(string(out)), 'false'));
@@ -1770,8 +1965,8 @@ if ~ok
         req_i = sprintf(['name: "%s", position: {x: %.3f, y: %.3f, z: %.3f}, ' ...
             'orientation: {x: 0.0, y: 0.0, z: %.6f, w: %.6f}'], ...
             runtime.model_candidates{mi}, target_x, target_y, target_z, qz, qw);
-        cmd_i = sprintf('bash -lc ''gz service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
-            runtime.set_pose_service, req_i);
+        cmd_i = sprintf('bash -lc ''%s service -s "%s" --reqtype gz.msgs.Pose --reptype gz.msgs.Boolean --timeout 1000 --req ''''''%s'''''' 2>/dev/null''', ...
+            autlResolveGzCmd(), runtime.set_pose_service, req_i);
         [rc_i, out_i] = system(cmd_i);
         if rc_i == 0 && ~contains(lower(string(out_i)), 'false')
             runtime.active_model_idx = mi;
@@ -2028,62 +2223,6 @@ if nargin < 3
     timeout_s = 20.0;
 end
 
-function [ok, msg] = autlWaitForStateTopicGate(mission_config, control_cfg)
-% Wait until MAVROS state topic reports FCU connected.
-
-ok = false;
-msg = 'state topic unavailable';
-
-timeout_s = max(2.0, double(mission_config.state_topic_timeout_s));
-t0 = tic;
-while toc(t0) < timeout_s
-    st_res = autlMavproxyControl('status', struct(), control_cfg);
-    if st_res.is_success
-        ok = true;
-        msg = 'connected=true';
-        return;
-    end
-    msg = char(string(autlCompactMavErrorTop(st_res.error_message)));
-    pause(0.4);
-end
-
-msg = sprintf('%s (timeout %.1fs)', msg, timeout_s);
-end
-
-function [ok, msg] = autlWaitForTakeoffGate(mav_config, mission_config, control_cfg)
-% Confirm that takeoff really happened before allowing collection.
-
-ok = false;
-msg = 'takeoff not confirmed';
-
-timeout_s = max(3.0, double(mission_config.takeoff_confirm_timeout_s));
-target_alt_m = max(0.3, double(mission_config.takeoff_height_m) * double(mission_config.takeoff_confirm_alt_ratio));
-
-t0 = tic;
-last_alt = 0.0;
-while toc(t0) < timeout_s
-    st_res = autlMavproxyControl('status', struct(), control_cfg);
-    if ~st_res.is_success
-        pause(0.2);
-        continue;
-    end
-
-    st = autlGetVehicleState(mav_config);
-    if isfield(st, 'mode') && ~strcmpi(char(string(st.mode)), 'NO_LINK')
-        last_alt = abs(double(st.position(3)));
-        if last_alt >= target_alt_m
-            ok = true;
-            msg = sprintf('connected=true alt=%.2fm (threshold=%.2fm)', last_alt, target_alt_m);
-            return;
-        end
-    end
-    pause(0.2);
-end
-
-msg = sprintf('connected but altitude low (last=%.2fm, threshold=%.2fm, timeout=%.1fs)', ...
-    last_alt, target_alt_m, timeout_s);
-end
-
 alt_tol_m = 0.6;
 vz_tol_ms = 0.5;
 stable_required_s = 1.5;
@@ -2128,6 +2267,185 @@ if isnan(last_alt)
     msg = sprintf('no telemetry link within %.1fs', timeout_s);
 else
     msg = sprintf('last alt=%.2fm vz=%.2fm/s mode=%s', last_alt, last_vz, char(last_mode));
+end
+end
+
+function [ok, msg] = autlWaitForStateTopicGate(mission_config, control_cfg)
+% Wait until MAVROS state topic reports FCU connected.
+
+ok = false;
+msg = 'state topic unavailable';
+
+timeout_s = max(2.0, double(mission_config.state_topic_timeout_s));
+t0 = tic;
+while toc(t0) < timeout_s
+    st_res = autlMavproxyControl('status', struct(), control_cfg);
+    if st_res.is_success
+        ok = true;
+        msg = 'connected=true';
+        return;
+    end
+    msg = char(string(autlCompactMavErrorTop(st_res.error_message)));
+    pause(0.4);
+end
+
+msg = sprintf('%s (timeout %.1fs)', msg, timeout_s);
+end
+
+function [ok, msg] = autlWaitForTakeoffGate(mav_config, mission_config, control_cfg)
+% Confirm that takeoff really happened before allowing collection.
+
+ok = false;
+msg = 'takeoff not confirmed';
+
+timeout_s = max(3.0, double(mission_config.takeoff_confirm_timeout_s));
+target_alt_m = max(0.3, double(mission_config.takeoff_height_m) * double(mission_config.takeoff_confirm_alt_ratio));
+
+t0 = tic;
+last_alt_mav = nan;
+last_alt_ros = nan;
+last_landed_state = nan;
+last_probe_msg = '';
+while toc(t0) < timeout_s
+    st_res = autlMavproxyControl('status', struct(), control_cfg);
+    if ~st_res.is_success
+        pause(0.2);
+        continue;
+    end
+
+    st = autlGetVehicleState(mav_config);
+    if isfield(st, 'mode') && ~strcmpi(char(string(st.mode)), 'NO_LINK')
+        last_alt_mav = abs(double(st.position(3)));
+    end
+
+    if strcmpi(char(string(mission_config.control_backend)), 'mavros')
+        [probe_ok, rel_alt_m, landed_state, probe_msg] = autlTryReadMavrosTakeoffEvidence(control_cfg);
+        if probe_ok
+            if ~isnan(rel_alt_m)
+                last_alt_ros = rel_alt_m;
+            end
+            if ~isnan(landed_state)
+                last_landed_state = landed_state;
+            end
+            last_probe_msg = probe_msg;
+        end
+    end
+
+    alt_candidates = [last_alt_mav, last_alt_ros];
+    valid_alt = alt_candidates(isfinite(alt_candidates));
+    best_alt_m = 0.0;
+    if ~isempty(valid_alt)
+        best_alt_m = max(valid_alt);
+    end
+
+    airborne_hint = isfinite(last_landed_state) && (last_landed_state >= 2.0);
+    if best_alt_m >= target_alt_m || (airborne_hint && best_alt_m >= 0.15)
+        ok = true;
+        msg = sprintf('connected=true alt_mav=%.2fm alt_mavros=%.2fm landed_state=%.0f threshold=%.2fm', ...
+            localNanToZero(last_alt_mav), localNanToZero(last_alt_ros), localNanToMinusOne(last_landed_state), target_alt_m);
+        return;
+    end
+    pause(0.2);
+end
+
+msg = sprintf('connected but altitude low (alt_mav=%.2fm, alt_mavros=%.2fm, landed_state=%.0f, threshold=%.2fm, timeout=%.1fs, probe=%s)', ...
+    localNanToZero(last_alt_mav), localNanToZero(last_alt_ros), localNanToMinusOne(last_landed_state), ...
+    target_alt_m, timeout_s, char(string(last_probe_msg)));
+end
+
+function [ok, rel_alt_m, landed_state, msg] = autlTryReadMavrosTakeoffEvidence(control_cfg)
+% Read MAVROS altitude and landed-state hints to validate takeoff progression.
+
+ok = false;
+rel_alt_m = nan;
+landed_state = nan;
+msg = 'no mavros evidence';
+
+ns = '/mavros';
+if isfield(control_cfg, 'control') && isstruct(control_cfg.control) && isfield(control_cfg.control, 'mavros_namespace') && ...
+        strlength(string(control_cfg.control.mavros_namespace)) > 0
+    ns = char(string(control_cfg.control.mavros_namespace));
+end
+if ~startsWith(ns, '/')
+    ns = ['/' ns];
+end
+if endsWith(ns, '/')
+    ns = ns(1:end-1);
+end
+
+this_file = mfilename('fullpath');
+repo_root = fileparts(fileparts(fileparts(fileparts(fileparts(fileparts(this_file))))));
+iicc26_setup = fullfile(fileparts(repo_root), 'IICC26_ws', 'install', 'setup.bash');
+source_overlay = sprintf('[ -f "%s" ] && source "%s" >/dev/null 2>&1; ', iicc26_setup, iicc26_setup);
+
+alt_cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout 2 ros2 topic echo --once %s/global_position/rel_alt 2>/dev/null''', ...
+    source_overlay, ns);
+[alt_rc, alt_out] = system(alt_cmd);
+if alt_rc == 0
+    tok = regexp(char(string(alt_out)), 'data\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)', 'tokens', 'once');
+    if ~isempty(tok)
+        rel_alt_m = str2double(tok{1});
+    end
+end
+
+landed_cmd = sprintf('bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; %sset -u; timeout 2 ros2 topic echo --once %s/extended_state 2>/dev/null''', ...
+    source_overlay, ns);
+[ls_rc, ls_out] = system(landed_cmd);
+if ls_rc == 0
+    tok = regexp(char(string(ls_out)), 'landed_state\s*:\s*(\d+)', 'tokens', 'once');
+    if ~isempty(tok)
+        landed_state = str2double(tok{1});
+    end
+end
+
+ok = isfinite(rel_alt_m) || isfinite(landed_state);
+if ok
+    msg = sprintf('rel_alt=%.2f landed_state=%.0f', localNanToZero(rel_alt_m), localNanToMinusOne(landed_state));
+end
+end
+
+function v = localNanToZero(x)
+if isfinite(x)
+    v = x;
+else
+    v = 0.0;
+end
+end
+
+function v = localNanToMinusOne(x)
+if isfinite(x)
+    v = x;
+else
+    v = -1.0;
+end
+end
+
+function [result, attempts] = autlRunControlWithRetry(action, params, control_cfg, max_attempts, retry_wait_s)
+% Retry control actions because MAVROS service readiness can lag behind state topic readiness.
+
+attempts = 0;
+if nargin < 4 || ~isfinite(double(max_attempts))
+    max_attempts = 1;
+end
+if nargin < 5 || ~isfinite(double(retry_wait_s))
+    retry_wait_s = 1.0;
+end
+
+max_attempts = max(1, round(double(max_attempts)));
+retry_wait_s = max(0.0, double(retry_wait_s));
+
+result = autlMavproxyControl(action, params, control_cfg);
+for k = 1:max_attempts
+    attempts = k;
+    if result.is_success
+        return;
+    end
+    if k < max_attempts && retry_wait_s > 0
+        pause(retry_wait_s);
+    end
+    if k < max_attempts
+        result = autlMavproxyControl(action, params, control_cfg);
+    end
 end
 end
 

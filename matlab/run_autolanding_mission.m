@@ -17,6 +17,7 @@ ws_root = fileparts(fileparts(mfilename('fullpath')));
 fprintf('[SETUP] Workspace root: %s\n', ws_root);
 
 % Add modules to path
+addpath(fullfile(ws_root, 'matlab'));
 mod_dir = fullfile(ws_root, 'matlab', 'modules');
 if exist(mod_dir, 'dir')
     addpath(mod_dir);
@@ -36,12 +37,7 @@ end
 % Use the full single-entry pipeline to avoid split startup paths.
 fprintf('\n[MISSION] Starting autonomous mission via AutoLandingMainFull...\n');
 try
-    mode_env = strtrim(getenv('AUTOLANDING_GAZEBO_MODE'));
-    if strcmpi(mode_env, 'server') || strcmpi(mode_env, 'headless')
-        AutoLandingMainFull('server');
-    else
-        AutoLandingMainFull('gui');
-    end
+    AutoLandingMainFull('mission');
     fprintf('\n[SUCCESS] Mission completed successfully!\n');
 catch ME
     fprintf('\n[ERROR] Mission failed: %s\n', ME.message);

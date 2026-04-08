@@ -4,5 +4,6 @@ function run_autolanding_pipeline()
 
 rootDir = fileparts(fileparts(fileparts(mfilename('fullpath'))));
 cd(rootDir);
-AutoLandingMainFull();
+addpath(fullfile(rootDir, 'matlab'));
+AutoLandingMainFull('full');
 end

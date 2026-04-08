@@ -4,8 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CFG="$ROOT_DIR/ai/configs/orchestration_config.yaml"
 KEEP_SIM_RUNNING=0
-RUN_BENCHMARK=1
-MIN_SAMPLES=50
+
+# Prefer workspace Python tools (MAVProxy/pymavlink) when available.
+if [[ -d "$ROOT_DIR/.venv/bin" ]]; then
+	export PATH="$ROOT_DIR/.venv/bin:$PATH"
+fi
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -13,19 +16,9 @@ while [[ $# -gt 0 ]]; do
 			KEEP_SIM_RUNNING=1
 			shift
 			;;
-		--skip-benchmark)
-			RUN_BENCHMARK=0
-			shift
-			;;
-		--min-samples)
-			MIN_SAMPLES="${2:-50}"
-			shift 2
-			;;
 		-h|--help)
-			echo "Usage: run_full_pipeline.sh [--keep-sim] [--skip-benchmark] [--min-samples N]"
+			echo "Usage: run_full_pipeline.sh [--keep-sim]"
 			echo "  --keep-sim   Keep Gazebo/SITL running after successful pipeline completion"
-			echo "  --skip-benchmark   Skip rollout-based model training/validation/plot stage"
-			echo "  --min-samples N    Minimum rollout samples required for training (default: 50)"
 			exit 0
 			;;
 		*)
@@ -79,11 +72,66 @@ echo "[pipeline] Starting full pipeline with Gazebo..."
 echo "[pipeline] Root directory: $ROOT_DIR"
 echo "[pipeline] Configuration: $CFG"
 
-# 이 스크립트 하나로 전체 파이프라인(full 모드)을 실행합니다.
-echo "[pipeline] Running autolanding pipeline..."
-python3 "$ROOT_DIR/scripts/autolanding_launcher.py" full \
-  --workspace-root "$ROOT_DIR" \
-  --orchestration-config "$CFG"
+SIM_LAUNCHER="$ROOT_DIR/simulation/launch/start_gz_ardupilot.sh"
+if [[ ! -x "$SIM_LAUNCHER" ]]; then
+	echo "[error] Missing simulation launcher: $SIM_LAUNCHER" >&2
+	exit 1
+fi
+
+if ! command -v matlab >/dev/null 2>&1; then
+	echo "[error] matlab command not found" >&2
+	exit 1
+fi
+
+echo "[pipeline] Launching Gazebo/SITL stack..."
+bash "$SIM_LAUNCHER" --kill-existing > "$ROOT_DIR/data/logs/full_pipeline_gazebo.log" 2>&1 &
+SIM_PID=$!
+
+ready=0
+for _ in $(seq 1 30); do
+	if pgrep -f "gz sim" >/dev/null 2>&1; then
+		ready=1
+		break
+	fi
+	sleep 2
+done
+
+if [[ $ready -ne 1 ]]; then
+	echo "[warning] Gazebo did not report readiness before MATLAB launch. Continuing anyway."
+fi
+
+wait_for_mavlink_heartbeat() {
+	local mavproxy_bin="mavproxy.py"
+	if [[ -x "$ROOT_DIR/.venv/bin/mavproxy.py" ]]; then
+		mavproxy_bin="$ROOT_DIR/.venv/bin/mavproxy.py"
+	elif ! command -v mavproxy.py >/dev/null 2>&1; then
+		echo "[warning] mavproxy.py not found; skipping heartbeat readiness check."
+		return 0
+	fi
+
+	echo "[pipeline] Waiting for MAVLink heartbeat on tcp:127.0.0.1:5760..."
+	local attempts=20
+	for _ in $(seq 1 "$attempts"); do
+		if timeout 10 "$mavproxy_bin" --master tcp:127.0.0.1:5760 --cmd="status" >/tmp/autolanding_mavproxy_ready.log 2>&1; then
+			if grep -q "Detected vehicle" /tmp/autolanding_mavproxy_ready.log; then
+				echo "[pipeline] MAVLink heartbeat detected."
+				return 0
+			fi
+		fi
+		sleep 2
+	done
+
+	echo "[error] MAVLink heartbeat was not detected in time."
+	echo "[hint] Check logs: $ROOT_DIR/data/logs/full_pipeline_gazebo.log and /tmp/autolanding_mavproxy_ready.log"
+	return 1
+}
+
+if ! wait_for_mavlink_heartbeat; then
+	cleanup_on_failure 1
+fi
+
+echo "[pipeline] Running autolanding pipeline in MATLAB..."
+matlab -batch "run('matlab/scripts/run_autolanding_pipeline.m')"
 
 status=$?
 if [[ $status -ne 0 ]]; then
@@ -91,25 +139,6 @@ if [[ $status -ne 0 ]]; then
 fi
 
 echo "[pipeline] Pipeline execution complete"
-
-if [[ $RUN_BENCHMARK -eq 1 ]]; then
-	echo "[pipeline] Running rollout-based benchmark training/validation (8:2 split)..."
-	python3 "$ROOT_DIR/scripts/run_research_benchmark.py" \
-	  --workspace-root "$ROOT_DIR" \
-	  --use-rollouts \
-	  --rollout-glob "data/collected/landing_controller_rollout_*.csv" \
-	  --min-samples "$MIN_SAMPLES" \
-	  --fallback-to-synthetic-on-rollout-failure \
-	  --train-ratio 0.8 \
-	  --val-ratio 0.2
-
-	bench_status=$?
-	if [[ $bench_status -ne 0 ]]; then
-		echo "[error] benchmark stage failed with exit code: $bench_status"
-		cleanup_on_failure "$bench_status"
-	fi
-	echo "[pipeline] Benchmark stage complete (models + validation + paper plots)."
-fi
 
 if [[ $KEEP_SIM_RUNNING -eq 1 ]]; then
 	echo "[pipeline] Gazebo/SITL are left running by request (--keep-sim)."

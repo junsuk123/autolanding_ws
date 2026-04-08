@@ -1,7 +1,6 @@
 function result = AutoLandingDataParallel(num_workers, scenarios_per_worker)
 % AUTOLANDINGDATAPARALLEL
-% MATLAB compatibility entrypoint.
-% Parallel collection orchestration is handled by scripts/autolanding_launcher.py.
+% MATLAB data collection entrypoint.
 
 if nargin < 1 || isempty(num_workers)
     num_workers = 3;
@@ -10,10 +9,20 @@ if nargin < 2 || isempty(scenarios_per_worker)
     scenarios_per_worker = 2;
 end
 
-if autlRunPythonLauncher('collect_parallel', num_workers, scenarios_per_worker)
-    result = {'python_launcher', num_workers * scenarios_per_worker};
-    return;
+rootDir = fileparts(fileparts(mfilename('fullpath')));
+modDir = fullfile(rootDir, 'matlab', 'modules');
+if exist(modDir, 'dir')
+    addpath(modDir);
+end
+coreDir = fullfile(modDir, 'core');
+if exist(coreDir, 'dir')
+    addpath(genpath(coreDir));
 end
 
-error('[AutoLandingDataParallel] Python launcher not found. Expected scripts/autolanding_launcher.py');
+cfg = autlLoadOrchestrationConfig(fullfile(rootDir, 'ai', 'configs', 'orchestration_config.yaml'));
+cfg.workers = num_workers;
+cfg.scenarios_per_worker = scenarios_per_worker;
+cfg.mode = 'collect_parallel';
+
+result = autlRunWorkspacePipeline(rootDir, 'collect_parallel', num_workers, scenarios_per_worker);
 end
