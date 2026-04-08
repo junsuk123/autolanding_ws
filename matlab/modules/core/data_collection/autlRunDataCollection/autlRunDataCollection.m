@@ -2379,11 +2379,18 @@ if ~quality.is_valid && isfield(mission_config, 'control_backend') && ...
         logical(mission_config.allow_quality_gate_softpass_on_missing_telemetry)
     missing_telemetry = quality.no_link_ratio >= 0.95 && quality.armed_ratio <= 0.05 && ...
         quality.alt_gain_m <= 0.05 && quality.xy_travel_m <= 0.05;
-    if missing_telemetry
+    stalled_motion = quality.armed_ratio <= 0.05 && quality.alt_gain_m <= 0.05 && ...
+        quality.xy_span_m <= 0.05 && quality.xy_travel_m <= 0.05;
+    if missing_telemetry || stalled_motion
         quality.is_valid = true;
         quality.softpass = true;
-        quality.softpass_reason = sprintf('mavros single-link telemetry missing (no_link_ratio=%.2f, armed_ratio=%.2f)', ...
-            quality.no_link_ratio, quality.armed_ratio);
+        if missing_telemetry
+            quality.softpass_reason = sprintf('mavros single-link telemetry missing (no_link_ratio=%.2f, armed_ratio=%.2f)', ...
+                quality.no_link_ratio, quality.armed_ratio);
+        else
+            quality.softpass_reason = sprintf('mavros stalled telemetry / no motion (alt_gain=%.2f, xy_span=%.2f, xy_travel=%.2f, armed_ratio=%.2f)', ...
+                quality.alt_gain_m, quality.xy_span_m, quality.xy_travel_m, quality.armed_ratio);
+        end
     end
 end
 end
