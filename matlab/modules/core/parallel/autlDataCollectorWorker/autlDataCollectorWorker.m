@@ -147,7 +147,7 @@ try
             mission_cfg.reset_ardupilot_each_scenario = config.reset_ardupilot_each_scenario;
         end
         if ~isfield(mission_cfg, 'mavlink_master')
-            mission_cfg.mavlink_master = 'tcp:127.0.0.1:5760';
+            mission_cfg.mavlink_master = 'udpin:127.0.0.1:14550';
         end
         if ~isfield(mission_cfg, 'mavlink_master_fallback')
             mission_cfg.mavlink_master_fallback = '';
@@ -467,7 +467,7 @@ function [ok, msg] = autlWaitForMavlinkReady(mission_cfg)
 ok = false;
 msg = '';
 
-master_conn = 'tcp:127.0.0.1:5760';
+    master_conn = 'udpin:127.0.0.1:14550';
 if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
     master_conn = char(string(mission_cfg.mavlink_master));
 end
@@ -487,7 +487,7 @@ if isfield(mission_cfg, 'mavlink_ready_poll_interval_s')
     poll_interval_s = max(0.3, double(mission_cfg.mavlink_ready_poll_interval_s));
 end
 
-ctrl_cfg = struct('mav', struct('master_connection', master_conn, 'timeout_s', mission_cfg.mavlink_control_timeout_s));
+ctrl_cfg = struct('mav', struct('master_connection', master_conn, 'allow_port_fallback', true, 'timeout_s', mission_cfg.mavlink_control_timeout_s));
 ctrl_cfg.control = struct('backend', 'mavproxy', 'allow_backend_fallback', true, 'mavros_namespace', '/mavros');
 if isfield(mission_cfg, 'control_backend')
     ctrl_cfg.control.backend = char(string(mission_cfg.control_backend));
@@ -555,7 +555,7 @@ function [ok, msg] = autlResetArduPilotState(mission_cfg)
 ok = false;
 parts = strings(0, 1);
 
-master_conn = 'tcp:127.0.0.1:5760';
+    master_conn = 'udpin:127.0.0.1:14550';
 if isfield(mission_cfg, 'mavlink_master') && strlength(string(mission_cfg.mavlink_master)) > 0
     master_conn = char(string(mission_cfg.mavlink_master));
 end

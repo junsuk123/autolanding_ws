@@ -4,7 +4,7 @@
 % Prerequisites:
 %   - Gazebo simulator running: gz sim iris_runway.sdf
 %   - ArduPilot SITL running: ardupilot with gazebo-iris model
-%   - MAVProxy connection available at tcp:127.0.0.1:5760
+%   - MAVLink heartbeat available at udpin:127.0.0.1:14550
 
 clear all; close all; clc;
 

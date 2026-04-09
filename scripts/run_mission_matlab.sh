@@ -72,16 +72,13 @@ fi
 echo ""
 echo "[CONNECT] Testing MAVProxy connection..."
 vehicle_port=""
-for PORT in 5762 5760; do
-    if timeout 20 mavproxy.py --master tcp:127.0.0.1:${PORT} --cmd="status" 2>/dev/null | grep -q "Detected vehicle"; then
-        vehicle_port="${PORT}"
-        break
-    fi
-done
+if timeout 20 mavproxy.py --master udpin:127.0.0.1:14550 --cmd="status" 2>/dev/null | grep -q "Detected vehicle"; then
+    vehicle_port="14550"
+fi
 if [[ -n "$vehicle_port" ]]; then
-    echo "[OK] Vehicle connection available at tcp:127.0.0.1:${vehicle_port}"
+    echo "[OK] Vehicle connection available at udpin:127.0.0.1:${vehicle_port}"
 else
-    echo "[WARNING] Could not connect to vehicle at tcp:127.0.0.1:5762 or tcp:127.0.0.1:5760"
+    echo "[WARNING] Could not connect to vehicle at udpin:127.0.0.1:14550"
     echo "[WARNING] Ensure Gazebo + ArduPilot SITL are running:"
     echo "  Terminal 1: gz sim -s iris_runway.sdf"
     echo "  Terminal 2: ./build/sitl/bin/arducopter --model JSON:127.0.0.1 ..."

@@ -92,9 +92,49 @@ def source_ros_setup() -> str:
 
 def launch_ros_gz_bridge() -> str:
     """Launch ros_gz_bridge for Gazebo↔ROS2 communication."""
-    topics = load_topic_settings()
-    image_topic = topics["camera_image_topic"]
-    info_topic = topics["camera_info_topic"]
+    bridge_cfg = ROOT / "simulation" / "configs" / "ros_gz_bridge_topics.yaml"
+    bridge_entries = []
+    if bridge_cfg.exists():
+        try:
+            payload = yaml.safe_load(bridge_cfg.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                bridge_entries = payload
+        except Exception:
+            bridge_entries = []
+
+    bridge_args = []
+    remap_args = []
+    for entry in bridge_entries:
+        if not isinstance(entry, dict):
+            continue
+        ros_topic = str(entry.get("ros_topic_name", "")).strip()
+        gz_topic = str(entry.get("gz_topic_name", "")).strip()
+        ros_type = str(entry.get("ros_type_name", "")).strip()
+        gz_type = str(entry.get("gz_type_name", "")).strip()
+        direction = str(entry.get("direction", "GZ_TO_ROS")).strip().upper()
+
+        if not ros_topic or not gz_topic or not ros_type or not gz_type:
+            continue
+
+        sep = "[" if direction == "GZ_TO_ROS" else "]"
+        bridge_args.append(f"{gz_topic}@{ros_type}{sep}{gz_type}")
+        remap_args.append(f"-r {gz_topic}:={ros_topic}")
+
+    if not bridge_args:
+        topics = load_topic_settings()
+        image_topic = topics["camera_image_topic"]
+        info_topic = topics["camera_info_topic"]
+        bridge_args = [
+            "/camera@sensor_msgs/msg/Image[gz.msgs.Image",
+            "/camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo",
+        ]
+        remap_args = [
+            f"-r /camera:={image_topic}",
+            f"-r /camera_info:={info_topic}",
+        ]
+
+    bridge_args_str = " \\\n+            ".join(bridge_args)
+    remap_args_str = " \\\n+            ".join(remap_args)
 
     env_clean = "unset LD_LIBRARY_PATH QT_PLUGIN_PATH QML2_IMPORT_PATH QT_QPA_PLATFORMTHEME PYTHONUSERBASE; "
     cmd = f"""
@@ -102,9 +142,8 @@ def launch_ros_gz_bridge() -> str:
     {env_clean}{source_ros_setup()}
     export ROS_DOMAIN_ID=${{ROS_DOMAIN_ID:-0}}
         ros2 run ros_gz_bridge parameter_bridge \
-            /camera@sensor_msgs/msg/Image[gz.msgs.Image \
-            /camera_info@sensor_msgs/msg/CameraInfo[gz.msgs.CameraInfo \
-            --ros-args -r /camera:={image_topic} -r /camera_info:={info_topic} \
+            {bridge_args_str} \
+            --ros-args {remap_args_str} \
       > /tmp/autolanding_ros_gz_bridge.log 2>&1
     '
     """

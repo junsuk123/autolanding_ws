@@ -30,8 +30,9 @@ fi
 MAV_PORT="${AUTOLANDING_MAVLINK_UDP_PORT:-14550}"
 MAVROS_ENABLE="${AUTOLANDING_ENABLE_MAVROS:-1}"
 MAVROS_REQUIRE="${AUTOLANDING_REQUIRE_MAVROS:-1}"
-# Architecture baseline: SITL <-> MAVROS over TCP 5760 (MAVLink).
-MAVROS_FCU_URL="${AUTOLANDING_MAVROS_FCU_URL:-tcp://127.0.0.1:5760}"
+AUTOLANDING_SITL_WIPE="${AUTOLANDING_SITL_WIPE:-1}"
+# Architecture baseline: SITL <-> MAVROS over TCP 5762 (MAVLink).
+MAVROS_FCU_URL="${AUTOLANDING_MAVROS_FCU_URL:-tcp://127.0.0.1:5762}"
 
 if [[ -f "$WORKDIR/scripts/common_ros_env.sh" ]]; then
   # shellcheck disable=SC1090
@@ -329,9 +330,22 @@ if ! ps -p "${GZ_PID}" >/dev/null 2>&1; then
   exit 1
 fi
 
+SITL_DEFAULTS="${ARDUPILOT_ROOT}/Tools/autotest/default_params/copter.parm,${ARDUPILOT_ROOT}/Tools/autotest/default_params/gazebo-iris.parm"
+if [[ -f "${WORKDIR}/mav.parm" ]]; then
+  SITL_DEFAULTS="${SITL_DEFAULTS},${WORKDIR}/mav.parm"
+fi
+
+SITL_WIPE_ARG=""
+if [[ "${AUTOLANDING_SITL_WIPE}" == "1" ]]; then
+  SITL_WIPE_ARG="-w"
+fi
+
+cd "${WORKDIR}"
+
 nohup setsid "${ARDUPILOT_ROOT}/build/sitl/bin/arducopter" \
   --model "JSON:${SIM_ADDR}" --speedup 1 --slave 0 --serial0=udpclient:127.0.0.1:${MAV_PORT} \
-  --defaults "${ARDUPILOT_ROOT}/Tools/autotest/default_params/copter.parm,${ARDUPILOT_ROOT}/Tools/autotest/default_params/gazebo-iris.parm" \
+  ${SITL_WIPE_ARG} \
+  --defaults "${SITL_DEFAULTS}" \
   -I0 >"${SITL_LOG}" 2>&1 < /dev/null &
 SITL_PID=$!
 sleep 8

@@ -76,6 +76,13 @@ J_land = sum_t (w_xy ||p_xy,t - p_m,xy||^2 + w_z (z_t - z_m)^2 + w_v ||v_t||^2)
 
 필요 시 위 개별 토픽 키만 별도로 override할 수 있습니다.
 
+### MAVLink Heartbeat Rule
+
+- 연결 여부는 `HEARTBEAT` 수신 여부와 `HEARTBEAT.autopilot != MAV_AUTOPILOT_INVALID` 기준으로 판단합니다.
+- 차량 제어는 MAVLink 프로토콜 자체가 아니라, 그 위의 heartbeat 기반 연결 판정을 만족한 뒤에만 수행합니다.
+- 단일 UAV 시뮬레이션의 기본 heartbeat 소스는 `udpin:127.0.0.1:14550`입니다.
+- ROS 토픽으로 받은 MAVLink 메시지를 다시 pack/encode 할 때는 `msg.pack(conn.mav)`로 로컬 MAVLink 인스턴스에 맞춰 CRC를 갱신합니다.
+
 ### Multi-UAV Scalable Protocol (N <= 10)
 
 This repository now includes a fully isolated `/uavX` architecture for Gazebo + SITL + MAVROS + MATLAB.

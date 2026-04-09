@@ -49,8 +49,19 @@ aruco_poses_topic: /autolanding/drone1/aruco_poses
 mavros_ns_prefix: /autolanding/mavros_w
 mavros_namespace: /mavros
 
+# MAVROS state topic gate timeout (seconds)
+state_topic_timeout_s: 35.0
+
+# Recovery wait after restarting stack when state topic is missing
+state_gate_timeout_after_recovery_s: 45.0
+enable_state_gate_stack_recovery: true
+
+# If true, fail immediately when Gazebo process is not detected before state gate.
+# If false, emit warning and continue to the state gate when MAVROS backend is selected.
+strict_gazebo_stack_gate: true
+
 # MATLAB control backend policy (single-path by default for comm stability)
-control_backend: mavros
+control_backend: mavproxy
 control_backend_fallback: false
 
 # 시뮬레이션 표시 옵션
@@ -73,6 +84,8 @@ auto_flight_demo: true
 demo_takeoff_alt_m: 1.2
 # Takeoff 확인 게이트 활성화
 require_takeoff_confirmation_before_collection: true
+# Disable telemetry soft-pass so non-flying runs are rejected.
+allow_takeoff_gate_softpass_on_missing_telemetry: false
 # 0이면 workers 개수 기준 SERIAL0 포트(5760, 5770, ...)를 자동 순회합니다.
 demo_master_port: 0
 
@@ -123,8 +136,13 @@ required_ros_interfaces:
 mavlink_precheck_timeout_s: 90.0
 mavlink_control_timeout_s: 20.0
 
-# Communication framework (Gazebo -> SITL -> MAVROS)
-# - MAVROS FCU transport: MAVLink over TCP 5760
-mavlink_master: tcp:127.0.0.1:5760
+# Enforce single-path control and reject fake-motion fallback in collection.
+allow_mavproxy_mode_fallback_on_mavros_reject: false
+drone_set_pose_fallback_enabled: false
+allow_quality_gate_softpass_on_missing_telemetry: false
+
+# Communication framework (Gazebo -> SITL -> MAVProxy control + optional MAVROS telemetry)
+# - Single-UAV SITL publishes MAVLink on UDP 14550; that is the primary control heartbeat source.
+mavlink_master: udpin:127.0.0.1:14550
 mavlink_master_fallback: ''
-mavros_fcu_url: tcp://127.0.0.1:5760
+mavros_fcu_url: tcp://127.0.0.1:5762

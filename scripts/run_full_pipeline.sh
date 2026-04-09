@@ -99,10 +99,10 @@ wait_for_mavlink_heartbeat() {
 		return 0
 	fi
 
-	echo "[pipeline] Waiting for MAVLink heartbeat on tcp:127.0.0.1:5760..."
+	echo "[pipeline] Waiting for MAVLink heartbeat on udpin:127.0.0.1:14550..."
 	local attempts=20
 	for _ in $(seq 1 "$attempts"); do
-		if timeout 10 "$mavproxy_bin" --master tcp:127.0.0.1:5760 --cmd="status" >/tmp/autolanding_mavproxy_ready.log 2>&1; then
+		if timeout 10 "$mavproxy_bin" --master udpin:127.0.0.1:14550 --cmd="status" >/tmp/autolanding_mavproxy_ready.log 2>&1; then
 			if grep -q "Detected vehicle" /tmp/autolanding_mavproxy_ready.log; then
 				echo "[pipeline] MAVLink heartbeat detected."
 				return 0

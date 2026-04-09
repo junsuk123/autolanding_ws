@@ -19,7 +19,7 @@ function summary = AutoLandingMainFull(varargin)
 %       'initial_spawn_y_m', 0.35, ...
 %       'initial_spawn_z_m', 0.15, ...
 %       'demo_takeoff_alt_m', 1.2, ...
-%       'control_backend', 'mavros'));
+%       'control_backend', 'mavproxy'));
 %
 % Legacy positional call is still supported:
 %   summary = AutoLandingMainFull('full', 1, 10);
@@ -44,6 +44,7 @@ if localNeedsSimulation(mode)
     cleanup_guard = onCleanup(@() localCleanupSimulationStack(rootDir)); %#ok<NASGU>
     localCleanupSimulationStack(rootDir);
     localEnsureSimulationStack(rootDir, run_params);
+    localEnsureMonitorStack(rootDir, run_params);
 end
 
 if isfield(run_params, 'num_landing_pads') && isfinite(run_params.num_landing_pads) && run_params.num_landing_pads > 1
@@ -178,7 +179,7 @@ params.initial_spawn_x_m = 1.0;
 params.initial_spawn_y_m = 0.35;
 params.initial_spawn_z_m = 0.15;
 params.demo_takeoff_alt_m = 1.2;
-params.control_backend = 'mavros';
+params.control_backend = 'mavproxy';
 params.mavlink_precheck_timeout_s = 90.0;
 end
 
@@ -251,6 +252,51 @@ if status ~= 0
     error('[AutoLandingMainFull] Failed to prepare Gazebo/SITL stack (exit=%d): %s', status, strtrim(output));
 end
 fprintf('[AutoLandingMainFull] Gazebo/SITL stack is ready.\n');
+end
+
+function localEnsureMonitorStack(rootDir, run_params)
+monitor_launcher = fullfile(rootDir, 'scripts', 'launch_rviz_monitor_py.py');
+if ~isfile(monitor_launcher)
+    fprintf('[AutoLandingMainFull] Warning: monitor launcher not found: %s\n', monitor_launcher);
+    return;
+end
+
+worker_count = 1;
+if isstruct(run_params) && isfield(run_params, 'num_drones')
+    worker_count = max(1, round(double(run_params.num_drones)));
+end
+
+cmd = sprintf(['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' ...
+    '[ -f "%s" ] && source "%s" >/dev/null 2>&1; set -u; ' ...
+    'AUTOLANDING_NUM_WORKERS=%d nohup python3 "%s" >/tmp/autolanding_rviz_monitor_launcher.log 2>&1 & disown; exit 0'''], ...
+    fullfile(rootDir, '..', 'IICC26_ws', 'install', 'setup.bash'), ...
+    fullfile(rootDir, '..', 'IICC26_ws', 'install', 'setup.bash'), ...
+    worker_count, monitor_launcher);
+system(cmd);
+
+camera_topic = '/autolanding/drone1/camera';
+max_wait_s = 25;
+topic_ready = false;
+for i = 1:max_wait_s
+    probe_cmd = sprintf(['bash -lc ''set +u; source /opt/ros/humble/setup.bash >/dev/null 2>&1; ' ...
+        '[ -f "%s" ] && source "%s" >/dev/null 2>&1; set -u; ' ...
+        'ros2 topic list 2>/dev/null | grep -q "^%s$"'''], ...
+        fullfile(rootDir, '..', 'IICC26_ws', 'install', 'setup.bash'), ...
+        fullfile(rootDir, '..', 'IICC26_ws', 'install', 'setup.bash'), ...
+        camera_topic);
+    [rc, ~] = system(probe_cmd);
+    if rc == 0
+        topic_ready = true;
+        break;
+    end
+    pause(1.0);
+end
+
+if topic_ready
+    fprintf('[AutoLandingMainFull] Monitor stack ready: %s\n', camera_topic);
+else
+    error('[AutoLandingMainFull] Monitor stack failed to publish %s within %d sec.', camera_topic, max_wait_s);
+end
 end
 
 function tf = localIsExplicitRunField(run_params, field_name)

@@ -109,6 +109,36 @@ ROS2 demo run in MATLAB:
 run('matlab/scripts/run_autolanding_ros_demo.m')
 ```
 
+## MAVLink <-> ROS Round-Trip
+
+When working with MAVROS message bridges, a MAVLink packet can be converted to a ROS message and then converted back again without forwarding through a live topic path. The conversion flow is:
+
+1. Read a MAVLink message with `recv_msg()`.
+2. Convert it to a ROS message with `mavlink.convert_to_rosmsg(msg)`.
+3. Convert the ROS message back to bytes with `mavlink.convert_to_bytes(rosmsg)`.
+4. Decode the bytes again with the local MAVLink instance.
+
+One important detail: if the ROS message is going to be repacked or re-encoded locally, call `msg.pack(conn.mav)` before conversion. That refreshes the message against the local MAVLink instance and avoids CRC mismatches during the round-trip.
+
+Minimal example:
+
+```python
+from pymavlink import mavutil
+from mavros import mavlink
+
+conn = mavutil.mavlink_connection("tcp:192.168.0.2:5760")
+
+while True:
+  msg = conn.recv_msg()
+  msg.pack(conn.mav)
+  rosmsg = mavlink.convert_to_rosmsg(msg)
+  payload = mavlink.convert_to_bytes(rosmsg)
+  original_message = conn.mav.decode(payload)
+  print(original_message)
+```
+
+This is useful when you need to inspect, transform, or relay MAVLink traffic independently of the GCS or drone transport layer.
+
 ## Current Runtime Behavior
 
 - `AutoLandingMainFull()` is the main automatic entrypoint for pipeline, validation, collection, mission, and full modes.
